@@ -41,5 +41,5 @@ if (productGroup == "COF") {
   html += "</ul>"
   return html
 } else {
-  return "" // Return an empty string if Product_Group is not "COF"
+  return "<div style='display: none;'></div>" // Return a hidden div
 }

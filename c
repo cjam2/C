@@ -1,24 +1,33 @@
-// Retrieve the selected Product Group (ensure the dropdown is named exactly "Product_Group")
-def productGroup = binding.variables.get("Product_Group") ?: ""
+// Use params instead of binding.variables
+def productGroup = params.Product_Group ?: ""
+println "DEBUG: Product_Group is: " + productGroup
 
-// Debug output (visible in Jenkins logs)
-println "DEBUG: Product_Group -> " + productGroup
+// Define malcode lists based on the selected product group
+def malcodesMap = [
+    "cod": ["CSL", "BRF", "CFP", "SAPI", "PLAPR", "PPA", "SOLIN", "PTTD", "BLDRA", "TINS", "TSI"],
+    "acc": ["CSps", "TSIhe"]
+]
 
-// Define malcode lists for each product group
-def malcodes = []
-if (productGroup == "cod") {
-    malcodes = ["CSL", "BRF", "CFP", "SAPI", "PLAPR", "PPA", "SOLIN", "PTTD", "BLDRA", "TINS", "TSI"]
-} else if (productGroup == "acc") {
-    malcodes = ["CSps", "TSIhe"]
+// If no product group is selected, show a message
+if (productGroup.trim() == "") {
+    return "<p style='color:red;'>No Product Group Selected!</p>"
 }
 
-// Start building the HTML content for the parameter
+// If the product group isn't recognized, show an error
+if (!malcodesMap.containsKey(productGroup)) {
+    return "<p style='color:red;'>Unknown MALCODE: " + productGroup + "</p>"
+}
+
+// Get the malcodes for the selected product group
+def malcodes = malcodesMap.get(productGroup)
+println "DEBUG: Malcodes for " + productGroup + " -> " + malcodes
+
+// Build HTML with styled checkboxes
 def html = """
 <html>
   <head>
     <style>
-      body { font-family: Arial, sans-serif; margin: 0; padding: 0; }
-      h3 { margin-bottom: 10px; }
+      body { font-family: Arial, sans-serif; }
       .checkbox-grid {
           display: flex;
           flex-wrap: wrap;
@@ -43,12 +52,8 @@ def html = """
     <div class="checkbox-grid">
 """
 
-if(malcodes.size() > 0) {
-    malcodes.each { code ->
-        html += """<label><input type='checkbox' name='malcode' value='${code}'> ${code}</label>"""
-    }
-} else {
-    html += "<p style='color: red;'>No Malcodes Available</p>"
+malcodes.each { code ->
+    html += """<label><input type='checkbox' name='malcode' value='${code}'> ${code}</label>"""
 }
 
 html += """
@@ -57,5 +62,4 @@ html += """
 </html>
 """
 
-// Return the HTML which will be rendered in the parameter UI
 return html

@@ -1,27 +1,22 @@
-#!/bin/bash
+# Function to add a row to the table
+add_table_row() {
+    local title="$1"
+    local values_str="$2"  # Accept values as a string
+    local values=()  # Initialize empty array
 
-allowed_malcodes=("mal1" "mal2" "mal3")
-got_malcode=("mal7" "mal2" "mal3")
+    # Convert space-separated string into an array
+    IFS=' ' read -r -a values <<< "$values_str"
 
-get_final_malcode() {
-  local -n allowed_arr=$1
-  local -n got_arr=$2
-  local final_arr=()
+    echo "<tr><td><b>${title}</b></td><td>" >> "$EMAIL_FILE"
 
-  for gm in "${got_arr[@]}"; do
-    for am in "${allowed_arr[@]}"; do
-      if [[ "$gm" == "$am" ]]; then
-        final_arr+=("$gm")
-        break
-      fi
-    done
-  done
+    # Correct condition to check if the array is empty or just whitespace
+    if [[ -z "$values_str" || ${#values[@]} -eq 0 ]]; then
+        echo "No Malcode Upgrade Needed according to the Technical Tracker" >> "$EMAIL_FILE"
+    else
+        for word in "${values[@]}"; do
+            echo "$word<br>" >> "$EMAIL_FILE"
+        done
+    fi
 
-  # Echo space-separated result
-  echo "${final_arr[@]}"
+    echo "</td></tr>" >> "$EMAIL_FILE"
 }
-
-# Call the function
-final_malcode=$(get_final_malcode allowed_malcodes got_malcode)
-
-echo "Final malcode array: $final_malcode"

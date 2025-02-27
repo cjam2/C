@@ -12,18 +12,18 @@ if (productGroup == "COF") {
     .malcode-item {
       display: flex;
       align-items: center;
-      margin-bottom: 8px; /* Increased spacing */
+      margin-bottom: 8px;
     }
     .malcode-item input[type="checkbox"] {
       width: 20px;
       height: 20px;
-      margin-right: 8px; /* Increased spacing */
-      border: 1px solid #ccc; /* Add a border */
-      border-radius: 3px; /* Slightly rounded corners */
+      margin-right: 8px;
+      border: 1px solid #ccc;
+      border-radius: 3px;
     }
     .malcode-item label {
       font-size: 16px;
-      color: #333; /* Darker text color */
+      color: #333;
     }
     .malcode-item input[type="checkbox"]:checked + label {
       font-weight: bold;
@@ -44,7 +44,18 @@ if (productGroup == "COF") {
   html += "</ul>"
   return html
 } else {
-  // Return the default checkboxes if Product_Group is not "COF"
-  // You might need to adjust this depending on how Jenkins handles the default behavior
-  return null; // Or return whatever Jenkins expects for default behavior
+  // Return the default checkboxes (without styling)
+  return """
+    <input type="checkbox" name="malcode" value="CSL"> CSL<br>
+    <input type="checkbox" name="malcode" value="BRF"> BRF<br>
+    <input type="checkbox" name="malcode" value="CFP"> CFP<br>
+    <input type="checkbox" name="malcode" value="SAPI"> SAPI<br>
+    <input type="checkbox" name="malcode" value="PLAPR"> PLAPR<br>
+    <input type="checkbox" name="malcode" value="PPA"> PPA<br>
+    <input type="checkbox" name="malcode" value="SOLIN"> SOLIN<br>
+    <input type="checkbox" name="malcode" value="PTTD"> PTTD<br>
+    <input type="checkbox" name="malcode" value="BLDRA"> BLDRA<br>
+    <input type="checkbox" name="malcode" value="TINS"> TINS<br>
+    <input type="checkbox" name="malcode" value="TSI"> TSI<br>
+  """
 }

@@ -1,44 +1,45 @@
-// Get the selected product group
-def pg = binding.variables.get("pg")
+def productGroup = Product_Group // Assuming Product_Group is a parameter
 
-// Define malcode lists based on the selected product group
-def malcodes = []
-if (pg == "cod") {
-    malcodes = ["CSL", "BRF", "CFP", "SAPI", "PLAPR", "PPA", "SOLIN", "PTTD", "BLDRA", "TINS", "TSI"]
-} else if (pg == "acc") {
-    malcodes = ["CSps", "TSIhe"]
-}
+if (productGroup == "COF") {
+  def malcodes = ["CSL", "BRF", "CFP", "SAPI", "PLAPR", "PPA", "SOLIN", "PTTD", "BLDRA", "TINS", "TSI"] // Replace with your actual list
 
-// Return an empty selection if no malcodes exist
-if (malcodes.isEmpty()) {
-    return "<p style='color:red;'><b>No Malcodes Available for this Product Group</b></p>"
-}
+  def html = """
+  <style>
+    .malcode-list {
+      list-style: none;
+      padding: 0;
+    }
+    .malcode-item {
+      display: flex;
+      align-items: center;
+      margin-bottom: 5px;
+    }
+    .malcode-item input[type="checkbox"] {
+      width: 20px;
+      height: 20px;
+      margin-right: 5px;
+    }
+    .malcode-item label {
+      font-size: 16px;
+    }
+    .malcode-item input[type="checkbox"]:checked + label {
+      font-weight: bold;
+    }
+  </style>
+  <ul class="malcode-list">
+  """
 
-// Generate HTML for a multi-column layout with checkboxes
-def html = """
-<style>
-  .checkbox-grid {
-    display: flex;
-    flex-wrap: wrap;
-    max-width: 500px;
+  malcodes.each { malcode ->
+    html += """
+    <li class="malcode-item">
+      <input type="checkbox" id="${malcode}" name="malcode" value="${malcode}">
+      <label for="${malcode}">${malcode}</label>
+    </li>
+    """
   }
-  .checkbox-grid label {
-    flex: 1 1 30%;
-    margin-bottom: 5px;
-  }
-  .checkbox-grid input {
-    margin-right: 5px;
-  }
-</style>
 
-<div class="checkbox-grid">
-"""
-
-// Add checkboxes dynamically based on the selected product group
-malcodes.each { code ->
-    html += """<label><input type='checkbox' name='malcode' value='${code}'> ${code}</label>"""
+  html += "</ul>"
+  return html
+} else {
+  return "Select COF Product Group to see Malcodes" // Or return an empty list if preferred
 }
-
-html += "</div>"
-
-return html

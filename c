@@ -1,61 +1,25 @@
-def productGroup = Product_Group // Assuming Product_Group is a parameter
+// Fetch the selected Product Group from Jenkins (handle null cases)
+def productGroup = binding.variables.get("Product_Group") ?: "none"
 
-if (productGroup == "COF") {
-  def malcodes = ["CSL", "BRF", "CFP", "SAPI", "PLAPR", "PPA", "SOLIN", "PTTD", "BLDRA", "TINS", "TSI"] // Replace with your actual list
+// Debugging output (optional, check Jenkins logs)
+println "Selected Product Group: " + productGroup
 
-  def html = """
-  <style>
-    .malcode-list {
-      list-style: none;
-      padding: 0;
-    }
-    .malcode-item {
-      display: flex;
-      align-items: center;
-      margin-bottom: 8px;
-    }
-    .malcode-item input[type="checkbox"] {
-      width: 20px;
-      height: 20px;
-      margin-right: 8px;
-      border: 1px solid #ccc;
-      border-radius: 3px;
-    }
-    .malcode-item label {
-      font-size: 16px;
-      color: #333;
-    }
-    .malcode-item input[type="checkbox"]:checked + label {
-      font-weight: bold;
-    }
-  </style>
-  <ul class="malcode-list">
-  """
+// Define malcode lists for each Product Group
+def malcodesMap = [
+    "cod": ["CSL", "BRF", "CFP", "SAPI", "PLAPR", "PPA", "SOLIN", "PTTD", "BLDRA", "TINS", "TSI"],
+    "acc": ["CSps", "TSIhe"]
+]
 
-  malcodes.each { malcode ->
-    html += """
-    <li class="malcode-item">
-      <input type="checkbox" id="${malcode}" name="malcode" value="${malcode}">
-      <label for="${malcode}">${malcode}</label>
-    </li>
-    """
-  }
+// Get malcodes based on the selected Product Group
+def malcodes = malcodesMap.get(productGroup, [])  // Default to empty list if no match
 
-  html += "</ul>"
-  return html
-} else {
-  // Return the default checkboxes (without styling)
-  return """
-    <input type="checkbox" name="malcode" value="CSL"> CSL<br>
-    <input type="checkbox" name="malcode" value="BRF"> BRF<br>
-    <input type="checkbox" name="malcode" value="CFP"> CFP<br>
-    <input type="checkbox" name="malcode" value="SAPI"> SAPI<br>
-    <input type="checkbox" name="malcode" value="PLAPR"> PLAPR<br>
-    <input type="checkbox" name="malcode" value="PPA"> PPA<br>
-    <input type="checkbox" name="malcode" value="SOLIN"> SOLIN<br>
-    <input type="checkbox" name="malcode" value="PTTD"> PTTD<br>
-    <input type="checkbox" name="malcode" value="BLDRA"> BLDRA<br>
-    <input type="checkbox" name="malcode" value="TINS"> TINS<br>
-    <input type="checkbox" name="malcode" value="TSI"> TSI<br>
-  """
+// If malcodes are empty, return a message instead
+if (malcodes.isEmpty()) {
+    return ["No Malcodes Available"]
 }
+
+// Debugging output (optional)
+println "Generated Malcodes: " + malcodes
+
+// Return malcodes (Jenkins will automatically create checkboxes)
+return malcodes

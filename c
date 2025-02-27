@@ -1,24 +1,25 @@
-// Fetch the selected Product Group (Make sure it's correctly referenced)
+// Get the selected Product Group from Jenkins
 def productGroup = binding.variables.get("Product_Group")
 
 // Debugging: Print the selected value in Jenkins logs
-println "Selected Product Group: " + productGroup
+println "DEBUG: Received Product Group -> " + productGroup
 
 // Define malcode lists based on the selected product group
-def malcodes = []
-if (productGroup == "cod") {
-    malcodes = ["CSL", "BRF", "CFP", "SAPI", "PLAPR", "PPA", "SOLIN", "PTTD", "BLDRA", "TINS", "TSI"]
-} else if (productGroup == "acc") {
-    malcodes = ["CSps", "TSIhe"]
+def malcodesMap = [
+    "cod": ["CSL", "BRF", "CFP", "SAPI", "PLAPR", "PPA", "SOLIN", "PTTD", "BLDRA", "TINS", "TSI"],
+    "acc": ["CSps", "TSIhe"]
+]
+
+// Ensure the product group is recognized
+if (!malcodesMap.containsKey(productGroup)) {
+    return ["⚠️ Unknown MALCODE: " + productGroup]
 }
 
-// If malcodes list is empty, return a default message
-if (malcodes.isEmpty()) {
-    return ["No Malcodes Available"]
-}
+// Retrieve malcodes for the selected product group
+def malcodes = malcodesMap.get(productGroup)
 
-// Debugging: Print the generated malcodes list in Jenkins logs
-println "Generated Malcodes: " + malcodes
+// Debugging: Print the generated malcodes in Jenkins logs
+println "DEBUG: Generated Malcodes -> " + malcodes
 
-// Return the malcodes list (Jenkins will generate checkboxes automatically)
+// Return the malcodes (Jenkins auto-generates checkboxes)
 return malcodes

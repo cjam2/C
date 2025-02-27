@@ -1,138 +1,44 @@
-#!/bin/bash
+// Get the selected product group
+def pg = binding.variables.get("pg")
 
-# Function to get filtered malcodes
-get_final_malcode() {
-  local -n allowed_arr=$1
-  local -n got_arr=$2
-  local final_arr=()
-
-  for gm in "${got_arr[@]}"; do
-    for am in "${allowed_arr[@]}"; do
-      if [[ "$gm" == "$am" ]]; then
-        final_arr+=("$gm")
-        break
-      fi
-    done
-  done
-
-  # Ensure proper output handling
-  if [[ ${#final_arr[@]} -eq 0 ]]; then
-    echo "No Malcode Upgrade Needed"
-  else
-    printf "%s\n" "${final_arr[@]}"  # Prints each malcode on a new line
-  fi
+// Define malcode lists based on the selected product group
+def malcodes = []
+if (pg == "cod") {
+    malcodes = ["CSL", "BRF", "CFP", "SAPI", "PLAPR", "PPA", "SOLIN", "PTTD", "BLDRA", "TINS", "TSI"]
+} else if (pg == "acc") {
+    malcodes = ["CSps", "TSIhe"]
 }
 
-# Define arrays
-allowed_malcodes=("mal1" "mal2" "mal3")
-got_malcode=("mal7" "mal2" "mal3")
-
-# Capture filtered malcodes
-filtered_malcodes=$(get_final_malcode allowed_malcodes got_malcode)
-
-# Create HTML file
-EMAIL_FILE="${WORKSPACE}/email_body.html"
-
-echo "<html><head><style>
-  body { font-family: Arial, sans-serif; }
-  table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-  th, td { border: 1px solid black; padding: 10px; text-align: left; vertical-align: top; }
-  th { background-color: #f2f2f2; font-weight: bold; }
-</style></head><body>" > "$EMAIL_FILE"
-
-echo "<h2>MALCODE Upgraded for ${month} Release in Credit Platform</h2>" >> "$EMAIL_FILE"
-echo "<table>" >> "$EMAIL_FILE"
-echo "<tr><th>Product Group</th><th>Malcodes</th></tr>" >> "$EMAIL_FILE"
-
-# Add filtered malcodes to the table (Ensuring line breaks)
-echo "<tr><td><b>Filtered Malcodes</b></td><td><pre>$filtered_malcodes</pre></td></tr>" >> "$EMAIL_FILE"
-
-echo "</table></body></html>" >> "$EMAIL_FILE"
-
-
-
-
-
-
-
-
-
-
-
-
-
-___________________
-
-
-
-
-
-
-
-
-
-# Function to capture final malcodes correctly
-get_final_malcode() {
-  local -n allowed_arr=$1
-  local -n got_arr=$2
-  local final_arr=()
-
-  for gm in "${got_arr[@]}"; do
-    for am in "${allowed_arr[@]}"; do
-      if [[ "$gm" == "$am" ]]; then
-        final_arr+=("$gm")
-        break
-      fi
-    done
-  done
-
-  # Ensure output is properly captured
-  if [[ ${#final_arr[@]} -eq 0 ]]; then
-    echo "No Malcode Upgrade Needed"
-  else
-    printf "%s\n" "${final_arr[@]}"  # Each malcode on a new line
-  fi
+// Return an empty selection if no malcodes exist
+if (malcodes.isEmpty()) {
+    return "<p style='color:red;'><b>No Malcodes Available for this Product Group</b></p>"
 }
 
-# Define arrays
-allowed_malcodes=("mal1" "mal2" "mal3")
-got_malcode=("mal7" "mal2" "mal3")
+// Generate HTML for a multi-column layout with checkboxes
+def html = """
+<style>
+  .checkbox-grid {
+    display: flex;
+    flex-wrap: wrap;
+    max-width: 500px;
+  }
+  .checkbox-grid label {
+    flex: 1 1 30%;
+    margin-bottom: 5px;
+  }
+  .checkbox-grid input {
+    margin-right: 5px;
+  }
+</style>
 
-# Capture the filtered malcodes in a variable
-filtered_malcodes=$(get_final_malcode allowed_malcodes got_malcode)
+<div class="checkbox-grid">
+"""
 
-# Function to add a row to the table
-add_table_row() {
-    local title="$1"
-    local values="$2"  # Capture values as a string
-
-    echo "<tr><td><b>${title}</b></td><td>" >> "$EMAIL_FILE"
-
-    # Ensure proper new-line formatting in HTML
-    if [[ "$values" == "No Malcode Upgrade Needed" || -z "$values" ]]; then
-        echo "$values" >> "$EMAIL_FILE"
-    else
-        echo "<pre>$values</pre>" >> "$EMAIL_FILE"  # Keeps line breaks intact
-    fi
-
-    echo "</td></tr>" >> "$EMAIL_FILE"
+// Add checkboxes dynamically based on the selected product group
+malcodes.each { code ->
+    html += """<label><input type='checkbox' name='malcode' value='${code}'> ${code}</label>"""
 }
 
-# Create HTML file
-EMAIL_FILE="${WORKSPACE}/email_body.html"
+html += "</div>"
 
-echo "<html><head><style>
-  body { font-family: Arial, sans-serif; }
-  table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-  th, td { border: 1px solid black; padding: 10px; text-align: left; vertical-align: top; }
-  th { background-color: #f2f2f2; font-weight: bold; }
-</style></head><body>" > "$EMAIL_FILE"
-
-echo "<h2>MALCODE Upgraded for ${month} Release in Credit Platform</h2>" >> "$EMAIL_FILE"
-echo "<table>" >> "$EMAIL_FILE"
-echo "<tr><th>Product Group</th><th>Malcodes</th></tr>" >> "$EMAIL_FILE"
-
-# Add filtered malcodes to the email table
-add_table_row "Filtered Malcodes" "$filtered_malcodes"
-
-echo "</table></body></html>" >> "$EMAIL_FILE"
+return html

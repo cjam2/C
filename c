@@ -1,12 +1,11 @@
 #!/bin/bash
 
-# These should come from Jenkins Choice Parameters
+# Jenkins should pass these as comma-separated values
 # Example:
-# TEST_SET=A1
-# APP=a
-# Jenkins will pass these as environment variables
+# TEST_SET="A1,b6"
+# APP="a,b"
 
-# Declare the associative array of hardcoded IPs
+# Declare the associative array
 declare -A servers
 
 servers[A1_a]="192.168.1.10"
@@ -21,15 +20,22 @@ servers[f6_a]="172.16.0.10"
 servers[f6_b]="172.16.0.11"
 servers[f6_c]="172.16.0.12"
 
-# Combine the Jenkins parameters
-key="${TEST_SET}_${APP}"
+# Split the comma-separated values into arrays
+IFS=',' read -ra test_sets <<< "$TEST_SET"
+IFS=',' read -ra apps <<< "$APP"
 
-# Check and print the result
-if [[ -n "${servers[$key]}" ]]; then
-  echo "Selected Environment: $TEST_SET"
-  echo "Selected Application: $APP"
-  echo "Server IP: ${servers[$key]}"
-else
-  echo "Invalid combination: $TEST_SET and $APP not found."
-  exit 1
-fi
+echo "Selected Environments: ${test_sets[*]}"
+echo "Selected Applications: ${apps[*]}"
+echo
+
+# Loop through all combinations
+for env in "${test_sets[@]}"; do
+  for app in "${apps[@]}"; do
+    key="${env}_${app}"
+    if [[ -n "${servers[$key]}" ]]; then
+      echo "$env - App $app -> Server: ${servers[$key]}"
+    else
+      echo "Warning: No server found for $key"
+    fi
+  done
+done

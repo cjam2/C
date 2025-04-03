@@ -1,73 +1,37 @@
-pipeline {
-    agent any
-    parameters {
-        string(name: 'CONFLUENCE_URL', defaultValue: 'https://your-confluence-instance', description: 'Base Confluence URL')
-        string(name: 'PAGE_ID', defaultValue: '123456', description: 'ID of the Confluence page to extract data from')
-        string(name: 'USERNAME', defaultValue: 'your-username', description: 'Confluence username')
-        password(name: 'PASSWORD', defaultValue: '', description: 'Confluence API token')
-        string(name: 'RECIPIENT_EMAIL', defaultValue: 'recipient@example.com', description: 'Email to receive the extracted codes')
-    }
-    environment {
-        API_URL = "${params.CONFLUENCE_URL}/rest/api/content/${params.PAGE_ID}?expand=body.storage"
-    }
-    stages {
-        stage('Extract Data from Confluence') {
-            steps {
-                script {
-                    echo "Fetching data from Confluence page ${params.PAGE_ID}..."
+#!/bin/bash
 
-                    def response = sh(script: """
-                        curl -u ${params.USERNAME}:${params.PASSWORD} -X GET "${env.API_URL}" -H "Accept: application/json" -s
-                    """, returnStdout: true).trim()
+# Input: comma-separated values
+ENV_SELECTION="$1"    # e.g., "A1,A2"
+MALCODES="$2"         # e.g., "a,c"
 
-                    def jsonResponse = readJSON(text: response)
-                    def htmlContent = jsonResponse.body.storage.value
-                    
-                    // Save the HTML content to a file
-                    writeFile file: 'confluence_content.html', text: htmlContent
+# Convert to arrays
+IFS=',' read -ra ENVS <<< "$ENV_SELECTION"
+IFS=',' read -ra MALCODES <<< "$MALCODES"
 
-                    echo "Extracting table data..."
+# Map of env+malcode to IP
+declare -A IP_MAP=(
+  ["A1-a"]="10.0.1.1"
+  ["A1-b"]="10.0.1.2"
+  ["A1-c"]="10.0.1.3"
+  ["A2-a"]="10.0.2.1"
+  ["A2-b"]="10.0.2.2"
+  ["A2-c"]="10.0.2.3"
+  ["A3-a"]="10.0.3.1"
+  ["A3-b"]="10.0.3.2"
+  ["A3-c"]="10.0.3.3"
+)
 
-                    // Parse table data using Python
-                    def extractedCodes = sh(script: """
-                        python3 -c '
-import sys
-from bs4 import BeautifulSoup
-
-with open("confluence_content.html", "r") as f:
-    soup = BeautifulSoup(f.read(), "html.parser")
-
-table = soup.find("table")
-codes = []
-
-if table:
-    for row in table.find_all("tr"):
-        cols = row.find_all("td")
-        if cols:
-            codes.append(cols[0].text.strip())
-
-print("\\n".join(codes))
-                        '""", returnStdout: true).trim()
-
-                    echo "Extracted Codes:\n${extractedCodes}"
-                    writeFile file: 'codes.txt', text: extractedCodes
-                }
-            }
-        }
-
-        stage('Send Email') {
-            steps {
-                script {
-                    echo "Sending email with extracted codes..."
-
-                    emailext (
-                        subject: "Extracted Confluence Codes",
-                        body: "Here are the extracted codes from Confluence:\n\n${readFile('codes.txt')}",
-                        to: "${params.RECIPIENT_EMAIL}",
-                        from: "jenkins@yourdomain.com"
-                    )
-                }
-            }
-        }
-    }
-}
+# Loop through all env-malcode combinations
+for env in "${ENVS[@]}"; do
+  for mal in "${MALCODES[@]}"; do
+    key="${env}-${mal}"
+    ip="${IP_MAP[$key]}"
+    if [ -n "$ip" ]; then
+      echo "Deploying malcode '$mal' to environment '$env' at IP: $ip"
+      # Your actual command here (example below):
+      ssh user@"$ip" "wget http://server/path/to/$mal && sudo systemctl restart app"
+    else
+      echo "No IP configured for combination $key"
+    fi
+  done
+done

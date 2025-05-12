@@ -1,31 +1,57 @@
 #!/bin/bash
 
-PROCESS_NAME="Abd_0000"
-LOG_DIR="$HOME/memory_logs"
-mkdir -p "$LOG_DIR"
-LOG_FILE="$LOG_DIR/${PROCESS_NAME}_usage_$(date +%Y%m%d_%H%M%S).log"
+# Hardcoded IPs for different environments
+declare -A ENV_IPS
+ENV_IPS["env1"]="192.168.1.10 192.168.1.11 192.168.1.12"
+ENV_IPS["env2"]="192.168.2.10 192.168.2.11 192.168.2.12"
+ENV_IPS["env3"]="192.168.3.10 192.168.3.11 192.168.3.12"
 
-echo "Monitoring $PROCESS_NAME started at $(date)" >> "$LOG_FILE"
+# Hardcoded application names for a, b, c
+declare -A APP_NAMES
+APP_NAMES["a"]="appA"
+APP_NAMES["b"]="appB"
+APP_NAMES["c"]="appC"
 
-while true
-do
-    TIMESTAMP=$(date)
+# Get environment from Jenkins dropdown parameter
+env_selected="$ENV_SELECTED"  # Replace ENV_SELECTED with the parameter from Jenkins
 
-    PID=$(pgrep -f "$PROCESS_NAME" | head -n 1)
+# Get the JAR URLs from the Jenkins parameters
+jar_url_a="$JAR_URL_A"  # Replace JAR_URL_A with the actual parameter for app A
+jar_url_b="$JAR_URL_B"  # Replace JAR_URL_B with the actual parameter for app B
+jar_url_c="$JAR_URL_C"  # Replace JAR_URL_C with the actual parameter for app C
 
-    if [ -z "$PID" ]; then
-        echo "[$TIMESTAMP] Process $PROCESS_NAME not running" >> "$LOG_FILE"
-    else
-        STATS=$(ps -p "$PID" -o pid,cmd,%mem,%cpu,rss --no-headers)
-        RSS_MB=$(echo "$STATS" | awk '{print $5/1024}')  # Convert KB to MB
+# Function to log into the server, replace the jar and restart the application
+function update_and_restart() {
+    local ip=$1
+    local app_name=$2
+    local jar_url=$3
 
-        echo "[$TIMESTAMP] $STATS" >> "$LOG_FILE"
-
-        # Alert if memory exceeds 1500MB
-        if (( $(echo "$RSS_MB > 1500" | bc -l) )); then
-            echo "[$TIMESTAMP] ALERT: Memory usage exceeded 1500MB: ${RSS_MB}MB" >> "$LOG_FILE"
-        fi
+    # Check if the JAR URL is empty
+    if [[ -z "$jar_url" ]]; then
+        echo "No JAR URL provided for $app_name on $ip. Skipping update."
+        return
     fi
 
-    sleep 60
-done
+    echo "Logging into server $ip to update $app_name..."
+
+    ssh -o StrictHostKeyChecking=no -T springboot@$ip << EOF
+        sudo -S -p "Enter password: " su -c "wget $jar_url -O /opt/springboot/applications/$app_name/$app_name.jar"
+        sudo -S -p "Enter password: " su -c "systemctl restart $app_name"
+EOF
+}
+
+# Logic to execute based on the selected environment
+if [[ -n "${ENV_IPS[$env_selected]}" ]]; then
+    # Get the IPs for the selected environment
+    ips=(${ENV_IPS[$env_selected]})
+
+    # Update and restart applications a, b, and c on the respective servers if JAR URLs are not empty
+    update_and_restart "${ips[0]}" "${APP_NAMES[a]}" "$jar_url_a"
+    update_and_restart "${ips[1]}" "${APP_NAMES[b]}" "$jar_url_b"
+    update_and_restart "${ips[2]}" "${APP_NAMES[c]}" "$jar_url_c"
+else
+    echo "Invalid environment selected!"
+    exit 1
+fi
+
+echo "Application updates completed!"

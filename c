@@ -1,15 +1,10 @@
 <script>
 window.addEventListener('DOMContentLoaded', function() {
-  var nameFieldName = "ProductGroup";
-  var emailFieldName = "recipientEmail";
 
-  console.log("Script loaded!");
+  var nameFieldName = "ProductGroup";    // Your dropdown field name
+  var emailFieldName = "recipientEmail"; // Your email field name
 
-  var nameField = document.querySelector('[name="' + nameFieldName + '"]');
-  var emailField = document.querySelector('[name="' + emailFieldName + '"]');
-
-  console.log("Dropdown field found:", nameField);
-  console.log("Email field found:", emailField);
+  console.log("Script loaded and ready!");
 
   var emailMap = {
     "CreditDecisioning:1": "CRPH01_RAD-Pod@td.com",
@@ -17,18 +12,25 @@ window.addEventListener('DOMContentLoaded', function() {
     "CreditDecisioning:3": "CRPHCR_RAD-Pod@td.com"
   };
 
+  var nameField = document.querySelector('[name="' + nameFieldName + '"]');
+  var emailField = document.querySelector('[name="' + emailFieldName + '"]');
+
+  console.log("Dropdown field:", nameField);
+  console.log("Email field:", emailField);
+
   if (nameField && emailField) {
     function updateEmail() {
-      console.log("Dropdown changed. Value:", nameField.value);
-      var email = emailMap[nameField.value] || "";
-      console.log("Setting email field to:", email);
+      var selectedID = nameField.value;
+      var email = emailMap[selectedID] || "";
+      console.log("Selected:", selectedID, "Setting email:", email);
       emailField.value = email;
     }
 
     nameField.addEventListener('change', updateEmail);
     updateEmail();
   } else {
-    console.log("Fields not found. Please check the field names in ConfiForms.");
+    console.log("One or both fields not found. Double-check field names.");
   }
+
 });
 </script>

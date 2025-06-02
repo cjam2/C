@@ -1,10 +1,9 @@
 <script>
-window.addEventListener('DOMContentLoaded', function() {
+AJS.toInit(function() {
+  console.log("Script loaded and running in AJS context!");
 
-  var nameFieldName = "ProductGroup";    // Your dropdown field name
-  var emailFieldName = "recipientEmail"; // Your email field name
-
-  console.log("Script loaded and ready!");
+  var nameFieldName = "ProductGroup";
+  var emailFieldName = "recipientEmail";
 
   var emailMap = {
     "CreditDecisioning:1": "CRPH01_RAD-Pod@td.com",
@@ -29,8 +28,7 @@ window.addEventListener('DOMContentLoaded', function() {
     nameField.addEventListener('change', updateEmail);
     updateEmail();
   } else {
-    console.log("One or both fields not found. Double-check field names.");
+    console.log("Fields not found. Double-check field names.");
   }
-
 });
 </script>

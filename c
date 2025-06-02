@@ -1,35 +1,34 @@
 <script>
 window.addEventListener('DOMContentLoaded', function() {
+  var nameFieldName = "ProductGroup";
+  var emailFieldName = "recipientEmail";
 
-  // Your field names from ConfiForms
-  var nameFieldName = "ProductGroup"; // Dropdown field (ID stored, label shown)
-  var emailFieldName = "recipientEmail"; // Read-only email field
+  console.log("Script loaded!");
 
-  // Define your mapping: ID → Email
-  var emailMap = {
-    "john": "john.doe@example.com",
-    "jane": "jane.smith@example.com",
-    "bob": "bob.brown@example.com"
-  };
-
-  // Get the fields
   var nameField = document.querySelector('[name="' + nameFieldName + '"]');
   var emailField = document.querySelector('[name="' + emailFieldName + '"]');
 
-  if (nameField && emailField) {
+  console.log("Dropdown field found:", nameField);
+  console.log("Email field found:", emailField);
 
+  var emailMap = {
+    "CreditDecisioning:1": "CRPH01_RAD-Pod@td.com",
+    "CreditDecisioning:2": "CRPH02_RAD-Pod@td.com",
+    "CreditDecisioning:3": "CRPHCR_RAD-Pod@td.com"
+  };
+
+  if (nameField && emailField) {
     function updateEmail() {
-      var selectedID = nameField.value; // Get the ID stored in the dropdown
-      var email = emailMap[selectedID] || ""; // Lookup the email from the map
-      emailField.value = email; // Set the email in the read-only field
+      console.log("Dropdown changed. Value:", nameField.value);
+      var email = emailMap[nameField.value] || "";
+      console.log("Setting email field to:", email);
+      emailField.value = email;
     }
 
-    // Trigger when dropdown changes
     nameField.addEventListener('change', updateEmail);
-
-    // Set initial value on page load
     updateEmail();
+  } else {
+    console.log("Fields not found. Please check the field names in ConfiForms.");
   }
-
 });
 </script>

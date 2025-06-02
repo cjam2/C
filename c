@@ -1,38 +1,35 @@
-<html>
-<head>
 <script>
-function updateEmail() {
-  // Mapping of names (or IDs) to emails - adjust this!
+window.addEventListener('DOMContentLoaded', function() {
+
+  // Your field names from ConfiForms
+  var nameFieldName = "ProductGroup"; // Dropdown field (ID stored, label shown)
+  var emailFieldName = "recipientEmail"; // Read-only email field
+
+  // Define your mapping: ID → Email
   var emailMap = {
-    "John Doe": "john.doe@example.com",
-    "Jane Smith": "jane.smith@example.com",
-    "Bob Brown": "bob.brown@example.com"
+    "john": "john.doe@example.com",
+    "jane": "jane.smith@example.com",
+    "bob": "bob.brown@example.com"
   };
 
-  // Get selected name from dropdown (adjust field name)
-  var dropdown = document.querySelector('[name="nameDropdown"]'); // Replace with your field name if different
-  var selectedName = dropdown.options[dropdown.selectedIndex].text;
+  // Get the fields
+  var nameField = document.querySelector('[name="' + nameFieldName + '"]');
+  var emailField = document.querySelector('[name="' + emailFieldName + '"]');
 
-  // Get the email based on the selected name
-  var email = emailMap[selectedName] || "";
+  if (nameField && emailField) {
 
-  // Set the email in the read-only box
-  var emailField = document.querySelector('[name="emailBox"]'); // Replace with your field name
-  if (emailField) {
-    emailField.value = email;
+    function updateEmail() {
+      var selectedID = nameField.value; // Get the ID stored in the dropdown
+      var email = emailMap[selectedID] || ""; // Lookup the email from the map
+      emailField.value = email; // Set the email in the read-only field
+    }
+
+    // Trigger when dropdown changes
+    nameField.addEventListener('change', updateEmail);
+
+    // Set initial value on page load
+    updateEmail();
   }
-}
 
-// Attach event listener on page load
-window.addEventListener('DOMContentLoaded', function() {
-  var dropdown = document.querySelector('[name="nameDropdown"]');
-  if (dropdown) {
-    dropdown.addEventListener('change', updateEmail);
-    updateEmail(); // Initialize on load
-  }
 });
 </script>
-</head>
-<body>
-</body>
-</html>

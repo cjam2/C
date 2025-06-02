@@ -1,23 +1,38 @@
-{confiforms:Form Name|name=EmailMapping}
-{confiforms-field:recipientName|type=text}
-{confiforms-field:recipientEmail|type=text}
-{confiforms:Form Name}
+<html>
+<head>
+<script>
+function updateEmail() {
+  // Mapping of names (or IDs) to emails - adjust this!
+  var emailMap = {
+    "John Doe": "john.doe@example.com",
+    "Jane Smith": "jane.smith@example.com",
+    "Bob Brown": "bob.brown@example.com"
+  };
 
+  // Get selected name from dropdown (adjust field name)
+  var dropdown = document.querySelector('[name="nameDropdown"]'); // Replace with your field name if different
+  var selectedName = dropdown.options[dropdown.selectedIndex].text;
 
+  // Get the email based on the selected name
+  var email = emailMap[selectedName] || "";
 
-{confiforms-table:EmailMapping}
+  // Set the email in the read-only box
+  var emailField = document.querySelector('[name="emailBox"]'); // Replace with your field name
+  if (emailField) {
+    emailField.value = email;
+  }
+}
 
-
-{confiforms:Form Name|name=RequestForm}
-{confiforms-field:recipientName|type=dropdown}
-John:sr_john
-Mary:br_mary
-Team:tr_team
-{confiforms-field}
-{confiforms-field:summary|type=text}
-{confiforms:Form Name}
-
-
-{confiforms-ifttt:RequestForm}
-{confiforms-ifttt-action:Send Email|to=[entry.recipientName.recipientEmail]|subject=CMR Received: [entry.summary]|body=Hello, a new form has been submitted by [entry.summary].}
-{confiforms-ifttt}
+// Attach event listener on page load
+window.addEventListener('DOMContentLoaded', function() {
+  var dropdown = document.querySelector('[name="nameDropdown"]');
+  if (dropdown) {
+    dropdown.addEventListener('change', updateEmail);
+    updateEmail(); // Initialize on load
+  }
+});
+</script>
+</head>
+<body>
+</body>
+</html>

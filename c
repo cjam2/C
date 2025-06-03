@@ -1,9 +1,6 @@
 <script>
 AJS.toInit(function() {
-  console.log("Custom JS injected via admin panel.");
-
-  var nameFieldName = "ProductGroup";
-  var emailFieldName = "recipientEmail";
+  console.log("Custom JS for ProductGroup → recipientEmail is active");
 
   var emailMap = {
     "CreditDecisioning:1": "CRPH01_RAD-Pod@td.com",
@@ -11,18 +8,28 @@ AJS.toInit(function() {
     "CreditDecisioning:3": "CRPHCR_RAD-Pod@td.com"
   };
 
-  var nameField = document.querySelector('[name="' + nameFieldName + '"]');
-  var emailField = document.querySelector('[name="' + emailFieldName + '"]');
+  function updateEmail() {
+    var nameField = document.querySelector('[name="ProductGroup"]');
+    var emailField = document.querySelector('[name="recipientEmail"]');
 
-  if (nameField && emailField) {
-    function updateEmail() {
+    if (nameField && emailField) {
       var selectedID = nameField.value;
       var email = emailMap[selectedID] || "";
       emailField.value = email;
+      console.log("Email updated to:", email);
+    } else {
+      console.log("Fields not found.");
     }
-
-    nameField.addEventListener('change', updateEmail);
-    updateEmail();
   }
+
+  // Attach event after ensuring DOM is ready
+  var interval = setInterval(function() {
+    var nameField = document.querySelector('[name="ProductGroup"]');
+    if (nameField) {
+      nameField.addEventListener('change', updateEmail);
+      updateEmail(); // Initial run
+      clearInterval(interval);
+    }
+  }, 100); // retry every 100ms until field appears (then stop)
 });
 </script>

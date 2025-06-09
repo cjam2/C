@@ -1,64 +1,59 @@
-#!/bin/sh
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
 
-# Usage: ./jira_create_subtask.sh ABC-123
-PARENT_TICKET=$1
+public class JiraSubtaskCreator {
 
-# Set your Jira variables
-JIRA_DOMAIN="your-domain.atlassian.net"
-JIRA_URL="https://$JIRA_DOMAIN"
-JIRA_PAT="your_actual_PAT_here"
+    public static void main(String[] args) throws Exception {
+        if (args.length < 2) {
+            System.out.println("Usage: JiraSubtaskCreator <PARENT_TICKET> <ASSIGNEE>");
+            return;
+        }
 
-# Subtask configuration
-SUMMARY="Subtask created from mainframe"
-DESCRIPTION="Automatically created via PAT-based script"
-SUBTASK_TYPE_ID="10002"     # Replace with actual subtask issue type ID
-DONE_TRANSITION_ID="31"     # Replace with actual transition ID for 'Done'
+        String parentTicket = args[0];
+        String assignee = args[1];
 
-# Authorization header using PAT
-AUTH_HEADER="Authorization: Bearer $JIRA_PAT"
+        String jiraDomain = "your-domain.atlassian.net"; // <-- Change this
+        String jiraToken = "your_actual_pat_here";       // <-- Change this
+        String jiraUrl = "https://" + jiraDomain + "/rest/api/2/issue";
+        String authHeader = "Bearer " + jiraToken;
 
-# ---- Step 1: Create subtask ----
-CREATE_RESPONSE=$(curl -s -X POST "$JIRA_URL/rest/api/2/issue" \
-  -H "$AUTH_HEADER" \
-  -H "Content-Type: application/json" \
-  -d "{
-    \"fields\": {
-      \"project\": { \"key\": \"${PARENT_TICKET%%-*}\" },
-      \"parent\": { \"key\": \"$PARENT_TICKET\" },
-      \"summary\": \"$SUMMARY\",
-      \"description\": \"$DESCRIPTION\",
-      \"issuetype\": { \"id\": \"$SUBTASK_TYPE_ID\" }
+        // Use subtask type ID and transition ID as needed
+        String issueTypeId = "10002"; // sub-task
+        String transitionId = "31";   // Done
+
+        String jsonPayload = "{\"fields\":{"
+            + "\"project\":{\"key\":\"" + parentTicket.split("-")[0] + "\"},"
+            + "\"parent\":{\"key\":\"" + parentTicket + "\"},"
+            + "\"summary\":\"Subtask from Java\","
+            + "\"description\":\"Created via Java program on z/OS\","
+            + "\"issuetype\":{\"id\":\"" + issueTypeId + "\"},"
+            + "\"assignee\":{\"name\":\"" + assignee + "\"}"
+            + "}}";
+
+        URL url = new URL(jiraUrl);
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        conn.setRequestMethod("POST");
+        conn.setRequestProperty("Authorization", authHeader);
+        conn.setRequestProperty("Content-Type", "application/json");
+        conn.setDoOutput(true);
+
+        try (OutputStream os = conn.getOutputStream()) {
+            byte[] input = jsonPayload.getBytes(StandardCharsets.UTF_8);
+            os.write(input, 0, input.length);
+        }
+
+        int responseCode = conn.getResponseCode();
+        System.out.println("HTTP Response Code: " + responseCode);
+        if (responseCode == 201) {
+            System.out.println(" Subtask created successfully.");
+        } else {
+            System.out.println(" Failed to create subtask. Check credentials and parameters.");
+        }
     }
-  }")
+}
 
-SUBTASK_KEY=$(echo "$CREATE_RESPONSE" | grep -o '"key":"[^"]*' | cut -d':' -f2 | tr -d '"')
 
-if [ -z "$SUBTASK_KEY" ]; then
-  echo "❌ Failed to create subtask:"
-  echo "$CREATE_RESPONSE"
-  exit 1
-fi
 
-echo "✅ Subtask created: $SUBTASK_KEY"
 
-# ---- Step 2: Add comment ----
-curl -s -X POST "$JIRA_URL/rest/api/2/issue/$SUBTASK_KEY/comment" \
-  -H "$AUTH_HEADER" \
-  -H "Content-Type: application/json" \
-  -d "{
-    \"body\": \"Subtask created and resolved using Jira PAT from z/OS.\"
-  }"
-
-echo "✅ Comment added"
-
-# ---- Step 3: Transition to Done ----
-curl -s -X POST "$JIRA_URL/rest/api/2/issue/$SUBTASK_KEY/transitions" \
-  -H "$AUTH_HEADER" \
-  -H "Content-Type: application/json" \
-  -d "{
-    \"transition\": {
-      \"id\": \"$DONE_TRANSITION_ID\"
-    }
-  }"
-
-echo "✅ Subtask transitioned to Done"

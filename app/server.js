@@ -107,8 +107,26 @@ const server = http.createServer(async (req, res) => {
       const formData = await parseForm(req);
       const ticketKey = await createJiraTicket(formData);
       await sendEmail(ticketKey, formData);
-      res.writeHead(200, { 'Content-Type': 'text/plain' });
-      res.end(`Created ticket ${ticketKey} and sent email`);
+      const message = `Created ticket ${ticketKey} and sent email`;
+      const html = `<!DOCTYPE html>
+        <html>
+        <head>
+          <title>Ticket Created</title>
+          <style>
+            body {font-family: Arial, sans-serif; background: #f0f0f0; display:flex; align-items:center; justify-content:center; height:100vh; margin:0;}
+            .box {background:#fff; padding:20px; border-radius:8px; box-shadow:0 4px 8px rgba(0,0,0,0.1); text-align:center;}
+            a {display:inline-block; margin-top:15px; color:#007bff; text-decoration:none;}
+          </style>
+        </head>
+        <body>
+          <div class="box">
+            <h2>${message}</h2>
+            <a href="/">Back to form</a>
+          </div>
+        </body>
+        </html>`;
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(html);
     } catch (err) {
       console.error(err);
       res.writeHead(500, { 'Content-Type': 'text/plain' });

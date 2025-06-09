@@ -1,9 +1,13 @@
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import javax.net.ssl.*;
 import java.security.cert.X509Certificate;
 import java.net.HttpURLConnection;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class JiraSubtaskCreator {
 
@@ -59,12 +63,52 @@ public class JiraSubtaskCreator {
             os.write(input, 0, input.length);
         }
 
-        int responseCode = conn.getResponseCode();
-        System.out.println("HTTP Response Code: " + responseCode);
-        if (responseCode == 201) {
-            System.out.println("✅ Subtask created successfully.");
+        BufferedReader br = new BufferedReader(new InputStreamReader(conn.getInputStream()));
+        StringBuilder response = new StringBuilder();
+        String line;
+        while ((line = br.readLine()) != null) {
+            response.append(line);
+        }
+        br.close();
+
+        String responseBody = response.toString();
+        System.out.println("HTTP Response Code: " + conn.getResponseCode());
+        System.out.println("Response Body: " + responseBody);
+
+        Pattern pattern = Pattern.compile("\"key\":\"(.*?)\"");
+        Matcher matcher = pattern.matcher(responseBody);
+        if (matcher.find()) {
+            String subtaskKey = matcher.group(1);
+            System.out.println("✅ Subtask created: " + subtaskKey);
+
+            // Step 2: Add a comment
+            URL commentUrl = new URL(jiraUrl + "/" + subtaskKey + "/comment");
+            HttpURLConnection commentConn = (HttpURLConnection) commentUrl.openConnection();
+            commentConn.setRequestMethod("POST");
+            commentConn.setRequestProperty("Authorization", authHeader);
+            commentConn.setRequestProperty("Content-Type", "application/json");
+            commentConn.setDoOutput(true);
+            String commentJson = "{\"body\":\"Subtask created and resolved from Java\"}";
+            try (OutputStream os = commentConn.getOutputStream()) {
+                os.write(commentJson.getBytes(StandardCharsets.UTF_8));
+            }
+            System.out.println("✅ Comment added.");
+
+            // Step 3: Transition to Done
+            URL transitionUrl = new URL(jiraUrl + "/" + subtaskKey + "/transitions");
+            HttpURLConnection transitionConn = (HttpURLConnection) transitionUrl.openConnection();
+            transitionConn.setRequestMethod("POST");
+            transitionConn.setRequestProperty("Authorization", authHeader);
+            transitionConn.setRequestProperty("Content-Type", "application/json");
+            transitionConn.setDoOutput(true);
+            String transitionJson = "{\"transition\":{\"id\":\"" + transitionId + "\"}}";
+            try (OutputStream os = transitionConn.getOutputStream()) {
+                os.write(transitionJson.getBytes(StandardCharsets.UTF_8));
+            }
+            System.out.println("✅ Subtask transitioned to Done.");
+
         } else {
-            System.out.println("❌ Failed to create subtask. Check credentials and parameters.");
+            System.out.println("❌ Failed to extract subtask key from response.");
         }
     }
 }

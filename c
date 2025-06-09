@@ -1,55 +1,30 @@
-<script>
-AJS.toInit(function () {
-  console.log("Email autofill JS is running...");
+#!/bin/sh
+PARENT_TICKET=$1
+JIRA_USER=your_user
+JIRA_PASS=your_token
+JIRA_URL=https://your-domain.atlassian.net
+SUBTASK_TYPE=10002
+DONE_TRANSITION_ID=31
 
-  var emailMap = {
-    "AFT001": "alpha@pod.com",
-    "AFT002": "bravo@pod.com",
-    "BFT001": "charlie@pod.com"
-  };
-
-  function bindProductGroupListener() {
-    var productGroupField = document.querySelector('[name="ProductGroup"]');
-    var emailField = document.querySelector('[name="recipientEmail"]');
-
-    if (!productGroupField || !emailField) {
-      console.log("Fields not found yet. Waiting...");
-      return;
+response=$(curl -s -u $JIRA_USER:$JIRA_PASS -X POST \
+  -H "Content-Type: application/json" \
+  -d '{
+    "fields": {
+      "project": { "key": "'${PARENT_TICKET%%-*}'" },
+      "parent": { "key": "'$PARENT_TICKET'" },
+      "summary": "Subtask from Mainframe",
+      "issuetype": { "id": "'$SUBTASK_TYPE'" }
     }
+  }' $JIRA_URL/rest/api/2/issue/)
 
-    // Avoid attaching multiple listeners
-    if (productGroupField.dataset.listenerAttached === "true") return;
-    productGroupField.dataset.listenerAttached = "true";
+SUBTASK_KEY=$(echo $response | grep -o '"key":"[^"]*' | cut -d':' -f2 | tr -d '"')
 
-    productGroupField.addEventListener("change", function () {
-      var selectedID = productGroupField.value;
-      var email = emailMap[selectedID] || "";
-      emailField.value = email;
-      console.log("Updated email for:", selectedID, "→", email);
-    });
+curl -s -u $JIRA_USER:$JIRA_PASS -X POST \
+  -H "Content-Type: application/json" \
+  -d "{\"body\": \"Subtask created and auto-resolved from mainframe.\"}" \
+  $JIRA_URL/rest/api/2/issue/$SUBTASK_KEY/comment
 
-    // Run once to initialize
-    var selectedID = productGroupField.value;
-    emailField.value = emailMap[selectedID] || "";
-    console.log("Initialized email for:", selectedID, "→", emailField.value);
-  }
-
-  // Watch the form for dynamic field re-rendering
-  const observer = new MutationObserver(function (mutationsList) {
-    for (const mutation of mutationsList) {
-      if (mutation.type === "childList") {
-        bindProductGroupListener();
-      }
-    }
-  });
-
-  // Observe entire form container
-  observer.observe(document.body, {
-    childList: true,
-    subtree: true
-  });
-
-  // Initial binding attempt
-  bindProductGroupListener();
-});
-</script>
+curl -s -u $JIRA_USER:$JIRA_PASS -X POST \
+  -H "Content-Type: application/json" \
+  -d "{\"transition\": { \"id\": \"$DONE_TRANSITION_ID\" }}" \
+  $JIRA_URL/rest/api/2/issue/$SUBTASK_KEY/transitions

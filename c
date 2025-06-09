@@ -1,9 +1,5 @@
-//CHMODJOB JOB (ACCT),'CHMOD PERM',
-//             CLASS=A,MSGCLASS=H,NOTIFY=&SYSUID
-//STEP1   EXEC PGM=BPXBATCH
-//STDOUT  DD SYSOUT=*
-//STDERR  DD SYSOUT=*
-//SYSIN   DD *
-SH chmod 755 /tmp/jira_create_subtask.sh
-/*
-//
+curl -H "Authorization: Basic $(echo -n "$JIRA_USER:$JIRA_TOKEN" | base64)" ...
+curl -H "Authorization: Bearer $JIRA_TOKEN" \
+     -H "Content-Type: application/json" \
+     --data '{ ... }' \
+     https://your-domain.atlassian.net/rest/api/2/issue/

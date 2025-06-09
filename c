@@ -1,7 +1,9 @@
-//JIRASUBT JOB ...
-//STEP1 EXEC PGM=BPXBATCH
+//CHMODJOB JOB (ACCT),'CHMOD PERM',
+//             CLASS=A,MSGCLASS=H,NOTIFY=&SYSUID
+//STEP1  EXEC PGM=BPXBATCH
 //STDOUT DD SYSOUT=*
 //STDERR DD SYSOUT=*
 //SYSIN  DD *
-SH /tmp/jira_create_subtask.sh ABC-123
+SH chmod 755 /tmp/jira_create_subtask.sh
 /*
+//

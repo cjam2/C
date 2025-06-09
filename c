@@ -1,7 +1,9 @@
 import java.io.OutputStream;
-import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import javax.net.ssl.*;
+import java.security.cert.X509Certificate;
+import java.net.HttpURLConnection;
 
 public class JiraSubtaskCreator {
 
@@ -18,6 +20,19 @@ public class JiraSubtaskCreator {
         String jiraToken = "your_actual_pat_here";       // <-- Change this
         String jiraUrl = "https://" + jiraDomain + "/rest/api/2/issue";
         String authHeader = "Bearer " + jiraToken;
+
+        // Disable SSL certificate validation (for testing only!)
+        TrustManager[] trustAllCerts = new TrustManager[] {
+            new X509TrustManager() {
+                public X509Certificate[] getAcceptedIssuers() { return null; }
+                public void checkClientTrusted(X509Certificate[] certs, String authType) {}
+                public void checkServerTrusted(X509Certificate[] certs, String authType) {}
+            }
+        };
+        SSLContext sc = SSLContext.getInstance("SSL");
+        sc.init(null, trustAllCerts, new java.security.SecureRandom());
+        HttpsURLConnection.setDefaultSSLSocketFactory(sc.getSocketFactory());
+        HttpsURLConnection.setDefaultHostnameVerifier((hostname, session) -> true);
 
         // Use subtask type ID and transition ID as needed
         String issueTypeId = "10002"; // sub-task
@@ -47,13 +62,9 @@ public class JiraSubtaskCreator {
         int responseCode = conn.getResponseCode();
         System.out.println("HTTP Response Code: " + responseCode);
         if (responseCode == 201) {
-            System.out.println(" Subtask created successfully.");
+            System.out.println("✅ Subtask created successfully.");
         } else {
-            System.out.println(" Failed to create subtask. Check credentials and parameters.");
+            System.out.println("❌ Failed to create subtask. Check credentials and parameters.");
         }
     }
 }
-
-
-
-

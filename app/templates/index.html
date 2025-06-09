@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Create JIRA Ticket</title>
+    <script>
+        function toggleAdditional() {
+            var drop4 = document.getElementById('drop4');
+            var additional1 = document.getElementById('additional1');
+            var additional2 = document.getElementById('additional2');
+            if (drop4.value === 'yes') {
+                additional1.style.display = 'block';
+            } else {
+                additional1.style.display = 'none';
+                additional2.style.display = 'none';
+            }
+        }
+        function toggleAdditional2() {
+            var drop4a = document.getElementById('drop4a');
+            var additional2 = document.getElementById('additional2');
+            if (drop4a.value) {
+                additional2.style.display = 'block';
+            } else {
+                additional2.style.display = 'none';
+            }
+        }
+    </script>
+</head>
+<body>
+    <h1>Create JIRA Ticket</h1>
+    <form method="POST" action="/submit">
+        <label>Dropdown 1:</label>
+        <select name="drop1">
+            <option value="opt1">Option 1</option>
+            <option value="opt2">Option 2</option>
+        </select>
+        <br>
+        <label>Dropdown 2:</label>
+        <select name="drop2">
+            <option value="optA">Option A</option>
+            <option value="optB">Option B</option>
+        </select>
+        <br>
+        <label>Dropdown 3:</label>
+        <select name="drop3">
+            <option value="optX">Option X</option>
+            <option value="optY">Option Y</option>
+        </select>
+        <br>
+        <label>Dropdown 4:</label>
+        <select id="drop4" name="drop4" onchange="toggleAdditional()">
+            <option value="no">No</option>
+            <option value="yes">Yes</option>
+        </select>
+        <div id="additional1" style="display:none;">
+            <label>Dropdown 4A:</label>
+            <select id="drop4a" name="drop4a" onchange="toggleAdditional2()">
+                <option value="">--select--</option>
+                <option value="a1">A1</option>
+                <option value="a2">A2</option>
+            </select>
+        </div>
+        <div id="additional2" style="display:none;">
+            <label>Dropdown 4B:</label>
+            <select id="drop4b" name="drop4b">
+                <option value="b1">B1</option>
+                <option value="b2">B2</option>
+            </select>
+        </div>
+        <br>
+        <!-- 8 text fields -->
+        <label>Summary:</label>
+        <input type="text" name="summary"><br>
+        <label>Description:</label>
+        <input type="text" name="description"><br>
+        <input type="text" name="field3"><br>
+        <input type="text" name="field4"><br>
+        <input type="text" name="field5"><br>
+        <input type="text" name="field6"><br>
+        <input type="text" name="field7"><br>
+        <input type="text" name="field8"><br>
+        <!-- dates -->
+        <label>Start Date:</label>
+        <input type="date" name="start_date"><br>
+        <label>End Date:</label>
+        <input type="date" name="end_date"><br>
+        <button type="submit">Submit</button>
+    </form>
+</body>
+</html>

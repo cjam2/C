@@ -6,102 +6,127 @@
       font-family: Arial, sans-serif;
       margin: 30px;
     }
+    .form-section {
+      max-width: 700px;
+      margin: auto;
+      border: 1px solid #ccc;
+      padding: 20px;
+      border-radius: 8px;
+      background-color: #f9f9f9;
+    }
+    h2 {
+      text-align: center;
+    }
+    .form-group {
+      margin-bottom: 15px;
+    }
     label {
       display: block;
-      margin-top: 10px;
+      margin-bottom: 5px;
       font-weight: bold;
     }
     input, select, textarea {
       width: 100%;
-      padding: 6px;
-      margin-top: 4px;
-    }
-    .hidden {
-      display: none;
+      padding: 8px;
+      box-sizing: border-box;
     }
     .required::after {
       content: " *";
       color: red;
     }
-    .form-section {
-      max-width: 600px;
-    }
     button {
-      margin-top: 20px;
       padding: 10px 20px;
+      font-size: 16px;
+      cursor: pointer;
     }
   </style>
 </head>
 <body><div class="form-section">
   <h2>Service Request Form</h2>
-  <form id="jiraForm">
-    <label class="required">Request Classification
-      <select id="requestClassification">
-        <option>-- Select --</option>
-        <option>Classification A</option>
-        <option>Classification B</option>
-      </select>
-    </label><label class="required">Request Type
+  <form id="jiraForm"><div class="form-group">
+  <label class="required">Request Classification</label>
+  <select id="requestClassification">
+    <option>-- Select --</option>
+    <option>Classification A</option>
+    <option>Classification B</option>
+  </select>
+</div>
+
+<div class="form-group">
+  <label class="required">Request Type</label>
   <select id="requestType">
     <option>-- Select --</option>
     <option>Type A</option>
     <option>Type B</option>
   </select>
-</label>
+</div>
 
-<label class="required">Is the project part of NEW
+<div class="form-group">
+  <label class="required">Is the project part of NEW</label>
   <select id="isNEW">
     <option value="no">No</option>
     <option value="yes">Yes</option>
   </select>
-</label>
+</div>
 
-<label class="required">Environment
+<div class="form-group">
+  <label class="required">Environment</label>
   <select id="environment">
     <option>-- Select --</option>
     <option>DEV</option>
     <option>QA</option>
     <option>PROD</option>
   </select>
-</label>
+</div>
 
-<label class="required">Application Name
+<div class="form-group">
+  <label class="required">Application Name</label>
   <input type="text" id="applicationName" />
-</label>
+</div>
 
-<label class="required">MALCODE
+<div class="form-group">
+  <label class="required">MALCODE</label>
   <input type="text" id="malcode" placeholder="Put 'NA' if unknown" />
-</label>
+</div>
 
-<label class="required">Test Set
+<div class="form-group">
+  <label class="required">Test Set</label>
   <input type="text" id="testSet" placeholder="Put 'NA' if not applicable" />
-</label>
+</div>
 
-<label>Version
+<div class="form-group">
+  <label>Version</label>
   <input type="text" id="version" />
-</label>
+</div>
 
-<label class="required">Email Address
+<div class="form-group">
+  <label class="required">Email Address</label>
   <input type="email" id="email" value="SaiSreekarReddy.Yammanuru@td.com" />
-</label>
+</div>
 
-<label class="required">Target Start Date
+<div class="form-group">
+  <label class="required">Target Start Date</label>
   <input type="date" id="startDate" />
-</label>
+</div>
 
-<label class="required">Target End Date
+<div class="form-group">
+  <label class="required">Target End Date</label>
   <input type="date" id="endDate" />
-</label>
+</div>
 
-<label class="required">Request Summary
+<div class="form-group">
+  <label class="required">Request Summary</label>
   <input type="text" id="summary" placeholder="JIRA Notification Email subject (include Test Set)" />
-</label>
+</div>
 
-<label class="required">Request Details
+<div class="form-group">
+  <label class="required">Request Details</label>
   <textarea id="details" rows="5" placeholder="Enter issue details and Error info or Stack"></textarea>
-</label>
+</div>
 
-<button type="submit">Submit</button>
+<div class="form-group" style="text-align: center;">
+  <button type="submit">Submit</button>
+</div>
 
   </form>
 </div><script>

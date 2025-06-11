@@ -1,7 +1,13 @@
-if (typeof AP !== 'undefined' && AP.user) {
-  AP.user.getCurrentUser(function(user) {
-    const emailInput = document.getElementById('emailField');
-    emailInput.value = user.email || '';
-    emailInput.style.border = '1px solid #ccc'; // visually reset if empty
+<input type="email" id="emailField" class="required" readonly placeholder="Loading user email..." style="...">
+
+<script>
+  AP.require(["user"], function(user) {
+    user.getCurrentUser(function(currentUser) {
+      const e = document.getElementById("emailField");
+      if (e) {
+        e.value = currentUser.email || "";
+        e.style.border = "1px solid #ccc";
+      }
+    });
   });
-}
+</script>

@@ -1,43 +1,90 @@
-<div style="display:flex; margin-bottom:20px;">
-  <label style="flex:0 0 240px; font-weight:600;">EML</label>
-  <input type="text" id="emlField" readonly placeholder="Auto-selected email" style="flex:1; padding:8px; border-radius:4px; border:1px solid #ccc; background:#f4f4f4;">
+<!-- Conditional Fields for "Is NEW" = No -->
+<div id="nonNewFields" style="display:none; margin-top:20px;">
+
+  <div style="display:flex; align-items:center; margin-bottom:20px;">
+    <label style="flex:0 0 240px;"></label>
+    <label><input type="checkbox" id="confirmCheckbox" style="margin-right:8px;"> Yes, I confirm</label>
+  </div>
+
+  <div style="display:flex; margin-bottom:20px;">
+    <label style="flex:0 0 240px; font-weight:600;">Product Family<span style="color:red;"> *</span></label>
+    <select id="productFamily" style="flex:1; padding:8px; border-radius:4px; border:1px solid #ccc;">
+      <option value="">Select product family</option>
+      <option value="Family A">Family A</option>
+      <option value="Family B">Family B</option>
+    </select>
+  </div>
+
+  <div style="display:flex; margin-bottom:20px;">
+    <label style="flex:0 0 240px; font-weight:600;">LOB<span style="color:red;"> *</span></label>
+    <select id="lob" style="flex:1; padding:8px; border-radius:4px; border:1px solid #ccc;">
+      <option value="">Select LOB</option>
+    </select>
+  </div>
+
+  <div style="display:flex; margin-bottom:20px;">
+    <label style="flex:0 0 240px; font-weight:600;">Project Name<span style="color:red;"> *</span></label>
+    <input type="text" id="projectName" style="flex:1; padding:8px; border-radius:4px; border:1px solid #ccc;" placeholder="Enter project name">
+  </div>
+
+  <div style="display:flex; margin-bottom:20px;">
+    <label style="flex:0 0 240px; font-weight:600;">Additional Details</label>
+    <input type="text" id="additionalDetails" style="flex:1; padding:8px; border-radius:4px; border:1px solid #ccc;" placeholder="Enter additional info">
+  </div>
+
 </div>
 
 
 
 
 
-  const emlField = document.getElementById('emlField');
 
-const emailMap = {
-  'Group A1': 'team-a1@example.com',
-  'Group A2': 'team-a2@example.com',
-  'Group B1': 'team-b1@example.com',
-  'Group B2': 'team-b2@example.com',
-  'Group C1': 'team-c1@example.com',
-  'Group C2': 'team-c2@example.com',
-  'fallback': 'non-new-projects@example.com'
+
+
+
+
+
+
+
+
+
+
+  const nonNewFields = document.getElementById('nonNewFields');
+const productFamily = document.getElementById('productFamily');
+const lob = document.getElementById('lob');
+const projectName = document.getElementById('projectName');
+
+const lobMap = {
+  'Family A': ['LOB A1', 'LOB A2'],
+  'Family B': ['LOB B1', 'LOB B2']
 };
 
-// Update EML on product group change
-productGroup.addEventListener('change', () => {
-  const isNewVal = isNew.value;
-  const group = productGroup.value;
+isNew.addEventListener('change', () => {
+  const isNo = isNew.value === 'No';
+  const isYes = isNew.value === 'Yes';
 
-  if (isNewVal === 'Yes' && emailMap[group]) {
-    emlField.value = emailMap[group];
-  } else if (isNewVal === 'No') {
-    emlField.value = emailMap['fallback'];
-  } else {
-    emlField.value = '';
+  // Show/hide relevant sections
+  nonNewFields.style.display = isNo ? 'block' : 'none';
+
+  // Reset dependent values
+  if (!isNo) {
+    document.getElementById('confirmCheckbox').checked = false;
+    productFamily.value = '';
+    lob.innerHTML = '<option value="">Select LOB</option>';
+    lob.value = '';
+    projectName.value = '';
+    document.getElementById('additionalDetails').value = '';
   }
 });
 
-// Update EML when "Is New" changes (if No is selected early)
-isNew.addEventListener('change', () => {
-  if (isNew.value === 'No') {
-    emlField.value = emailMap['fallback'];
-  } else {
-    emlField.value = ''; // reset until productGroup is selected
-  }
+productFamily.addEventListener('change', () => {
+  const selected = productFamily.value;
+  const lobOptions = lobMap[selected] || [];
+  lob.innerHTML = '<option value="">Select LOB</option>';
+  lobOptions.forEach(opt => {
+    const option = document.createElement('option');
+    option.value = opt;
+    option.textContent = opt;
+    lob.appendChild(option);
+  });
 });

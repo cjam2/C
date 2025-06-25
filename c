@@ -1,10 +1,7 @@
-AP.user.getUser(function(user) {
-  console.log("Account ID:", user.atlassianAccountId);
-  console.log("Display name:", user.fullName);
-  console.log("Time zone:", user.timeZone);
-  
+<script>
+AJS.toInit(function() {
+  // Get username if it's rendered somewhere in the DOM (not email)
+  var userInfo = AJS.params.remoteUser;  // Only works in some Server versions
+  console.log("Logged-in user:", userInfo); // May be blank in Cloud
 });
-
-
-email = [entry._user.email]
-email = [owner]
+</script>

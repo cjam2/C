@@ -1,11 +1,10 @@
-<script>
-  AJS.toInit(function() {
-    // Wait for DOM to load and grab the hidden email field by name
-    var emailField = document.querySelector('[name="userEmail"]');
-    if (emailField) {
-      console.log("Logged-in user email:", emailField.value);
-      // Now you can use the email value in your script
-    }
-  });
-</script>
-{confiforms-field:userEmail|type=text|default=[entry._user.email]|readonly=true}
+AP.user.getUser(function(user) {
+  console.log("Account ID:", user.atlassianAccountId);
+  console.log("Display name:", user.fullName);
+  console.log("Time zone:", user.timeZone);
+  
+});
+
+
+email = [entry._user.email]
+email = [owner]

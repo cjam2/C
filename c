@@ -1,23 +1,13 @@
-name: Run Shell Script with Env Vars
+name: Say Hello
 
 on:
-  schedule:
-    - cron: '0 3 * * *'
-  workflow_dispatch:
+  push:              # Runs on every push
+  workflow_dispatch: # Allows manual trigger
 
 jobs:
-  run-script:
+  say-hello:
     runs-on: ubuntu-latest
-    env:
-      PARAMS: "--env dev --ip 10.0.0.1 --user admin --enable-feature-x"
-      # Or: PARAMS: ${{ secrets.MY_PARAMS }}
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v3
-
-    - name: Make script executable
-      run: chmod +x ./scripts/run_me.sh
-
-    - name: Run script with env parameters
-      run: ./scripts/run_me.sh $PARAMS
+    - name: Print greeting
+      run: echo "Hello, world!"

@@ -1,33 +1,42 @@
-- name: Save output to file
-  run: |
-    echo "Some log output" > output.log
+name: Run Script with Multi-Line Servers
 
-- name: Upload log as artifact
-  uses: actions/upload-artifact@v4
-  with:
-    name: logs
-    path: output.log
+on:
+  workflow_dispatch:
+    inputs:
+      servers:
+        description: "List of servers separated by __NEWLINE__"
+        required: true
+        default: "10.8.97.654__NEWLINE__10.9.97.777__NEWLINE__10.8.98.8575"
+      ssh_user:
+        description: "SSH username"
+        required: true
+        default: "admin"
+      ssh_pass:
+        description: "SSH password"
+        required: true
 
+jobs:
+  process-servers:
+    runs-on: ubuntu-latest
 
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v3
 
-- name: Save log to file
-  run: |
-    echo "Hello log data" > logs.txt
+    - name: Prepare server list and run script
+      run: |
+        # Convert __NEWLINE__ to real newlines
+        CLEANED_SERVERS=$(echo "${{ github.event.inputs.servers }}" | sed 's/__NEWLINE__/\
+/g')
 
-- name: Send email with attachment
-  uses: dawidd6/action-send-mail@v3
-  with:
-    server_address: smtp.gmail.com
-    server_port: 465
-    username: ${{ secrets.EMAIL_USERNAME }}
-    password: ${{ secrets.EMAIL_PASSWORD }}
-    subject: GitHub Action Log
-    to: your@email.com
-    from: GitHub Actions <${{ secrets.EMAIL_USERNAME }}>
-    body: |
-      Hello, your job has completed.
-      Please see the attached log file.
-    attachments: logs.txt
+        echo "Parsed server list:"
+        echo "$CLEANED_SERVERS"
 
+        # Save to file for script consumption
+        echo "$CLEANED_SERVERS" > servers.txt
 
+        # (Optional) make your script executable
+        chmod +x ./scripts/run.sh
 
+        # Run your script and pass values
+        ./scripts/run.sh "$(cat servers.txt)" "${{ github.event.inputs.ssh_user }}" "${{ github.event.inputs.ssh_pass }}"

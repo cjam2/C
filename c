@@ -1,10 +1,20 @@
-<button onclick="copyToClipboard()">Copy Jenkins Trigger</button>
+name: Run Shell Script on Schedule
 
-<script>
-function copyToClipboard() {
-  const cmd = `curl -X POST https://jenkins.example.com/job/your-job-name/build?token=YOURTOKEN`;
-  navigator.clipboard.writeText(cmd)
-    .then(() => alert("Command copied. Paste it into your terminal."))
-    .catch(() => alert("Failed to copy"));
-}
-</script>
+on:
+  schedule:
+    - cron: '0 3 * * *'  # runs daily at 3 AM UTC
+  workflow_dispatch:      # allows manual run (optional)
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Make script executable
+      run: chmod +x ./scripts/run_me.sh  # update path if needed
+
+    - name: Run script with parameters
+      run: ./scripts/run_me.sh param1 param2

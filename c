@@ -60,3 +60,45 @@ Labour Day	2026-09-07
 Thanksgiving	2026-10-12
 Christmas Day	2026-12-25
 Boxing Day	2026-12-26
+
+
+
+
+
+
+
+    name: Run Script with Server List from File
+
+on:
+  workflow_dispatch:
+    inputs:
+      ssh_user:
+        description: "SSH Username"
+        required: true
+        default: "admin"
+      ssh_pass:
+        description: "SSH Password"
+        required: true
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v3
+
+    - name: Run script with servers from file
+      run: |
+        # Remove carriage returns and comments from the file
+        SERVERS=$(grep -v '^#' params/servers.txt | tr -d '\r')
+
+        echo "Running on the following servers:"
+        echo "$SERVERS"
+
+        # Optional: Write cleaned servers to temp file
+        echo "$SERVERS" > servers-cleaned.txt
+
+        chmod +x ./scripts/run.sh
+        ./scripts/run.sh "$SERVERS" "${{ github.event.inputs.ssh_user }}" "${{ github.event.inputs.ssh_pass }}"
+

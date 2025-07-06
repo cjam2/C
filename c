@@ -1,17 +1,27 @@
-#!/bin/bash
+import hudson.util.Secret
+import jenkins.model.*
+import hudson.tasks.Mailer
 
-# List of programs to check
-TOOLS=("awk" "sshpass" "curl" "wget" "sed" "grep" "git" "expect" "ssh" "python3" "node")
+def mailer = Jenkins.instance.getDescriptor(Mailer.class)
 
-echo "🔍 Checking installed programs..."
+println "=== SMTP Configuration ==="
+println "SMTP Host      : ${mailer.smtpHost}"
+println "SMTP Port      : ${mailer.smtpPort}"
+println "Use SSL        : ${mailer.useSsl}"
+println "Reply-To Addr  : ${mailer.replyToAddress}"
+println "Charset        : ${mailer.charset ?: 'default'}"
 
-for tool in "${TOOLS[@]}"; do
-  if command -v "$tool" &>/dev/null; then
-    version=$("$tool" --version 2>/dev/null | head -n 1)
-    echo "$tool is installed — $version"
-  else
-    echo " $tool is NOT installed"
-  fi
-done
+def username = mailer.smtpAuthUsername
+def password = Secret.toString(mailer.smtpAuthPassword)
 
-echo " Program check complete."
+if (username) {
+    println "SMTP Username  : ${username}"
+} else {
+    println "SMTP Username  : (not set)"
+}
+
+if (password) {
+    println "SMTP Password  : ${password}"
+} else {
+    println "SMTP Password  : (not set)"
+}

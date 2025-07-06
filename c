@@ -1,27 +1,11 @@
-import hudson.util.Secret
-import jenkins.model.*
-import hudson.tasks.Mailer
+node {
+    def mailer = Jenkins.instance.getDescriptor(hudson.tasks.Mailer.class)
 
-def mailer = Jenkins.instance.getDescriptor(Mailer.class)
-
-println "=== SMTP Configuration ==="
-println "SMTP Host      : ${mailer.smtpHost}"
-println "SMTP Port      : ${mailer.smtpPort}"
-println "Use SSL        : ${mailer.useSsl}"
-println "Reply-To Addr  : ${mailer.replyToAddress}"
-println "Charset        : ${mailer.charset ?: 'default'}"
-
-def username = mailer.smtpAuthUsername
-def password = Secret.toString(mailer.smtpAuthPassword)
-
-if (username) {
-    println "SMTP Username  : ${username}"
-} else {
-    println "SMTP Username  : (not set)"
-}
-
-if (password) {
-    println "SMTP Password  : ${password}"
-} else {
-    println "SMTP Password  : (not set)"
+    echo "=== SMTP Configuration ==="
+    echo "SMTP Host      : ${mailer.smtpHost}"
+    echo "SMTP Port      : ${mailer.smtpPort}"
+    echo "Use SSL        : ${mailer.useSsl}"
+    echo "Reply-To Addr  : ${mailer.replyToAddress}"
+    echo "SMTP Username  : ${mailer.smtpAuthUsername}"
+    echo "SMTP Password  : ${hudson.util.Secret.toString(mailer.smtpAuthPassword)}"
 }

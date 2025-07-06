@@ -1,17 +1,17 @@
-- name: Check and install sshpass using expect if needed
-  run: |
-    if ! command -v sshpass &> /dev/null; then
-      echo "sshpass not found. Installing using expect..."
+#!/bin/bash
 
-      sudo -k  # force sudo to prompt for password
+# List of programs to check
+TOOLS=("awk" "sshpass" "curl" "wget" "sed" "grep" "git" "expect" "ssh" "python3" "node")
 
-      expect <<EOF
-      spawn sudo apt-get update && sudo apt-get install -y sshpass
-      expect "password for"
-      send "${{ secrets.SUDO_PASS }}\r"
-      expect eof
-EOF
+echo "🔍 Checking installed programs..."
 
-    else
-      echo "sshpass is already installed. Skipping installation."
-    fi
+for tool in "${TOOLS[@]}"; do
+  if command -v "$tool" &>/dev/null; then
+    version=$("$tool" --version 2>/dev/null | head -n 1)
+    echo "$tool is installed — $version"
+  else
+    echo " $tool is NOT installed"
+  fi
+done
+
+echo " Program check complete."

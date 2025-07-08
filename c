@@ -1,11 +1,6 @@
-node {
-    def mailer = Jenkins.instance.getDescriptor(hudson.tasks.Mailer.class)
-
-    echo "=== SMTP Configuration ==="
-    echo "SMTP Host      : ${mailer.smtpHost}"
-    echo "SMTP Port      : ${mailer.smtpPort}"
-    echo "Use SSL        : ${mailer.useSsl}"
-    echo "Reply-To Addr  : ${mailer.replyToAddress}"
-    echo "SMTP Username  : ${mailer.smtpAuthUsername}"
-    echo "SMTP Password  : ${hudson.util.Secret.toString(mailer.smtpAuthPassword)}"
-}
+curl --url "smtp://smtp-relay.company.com:25" \
+  --mail-from "jenkins@company.com" \
+  --mail-rcpt "you@example.com" \
+  --upload-file "${GITHUB_WORKSPACE}/email.html" \
+  --header "Subject: Build Notification" \
+  --header "Content-Type: text/html"

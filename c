@@ -1,6 +1,9 @@
-curl --url "smtp://smtp-relay.company.com:25" \
-  --mail-from "jenkins@company.com" \
-  --mail-rcpt "you@example.com" \
-  --upload-file "${GITHUB_WORKSPACE}/email.html" \
-  --header "Subject: Build Notification" \
+curl --url "smtps://smtp.office365.com:465" \
+  --ssl-reqd \
+  --mail-from "your_email@outlook.com" \
+  --mail-rcpt "recipient@example.com" \
+  --user "your_email@outlook.com:your_app_password" \
+  --upload-file email.html \
+  --header "Subject: Test Email from curl (Outlook)" \
+  --header "From: Your Name <your_email@outlook.com>" \
   --header "Content-Type: text/html"

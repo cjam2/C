@@ -1,0 +1,79 @@
+name: All Input Types Demo
+
+on:
+  workflow_dispatch:
+    inputs:
+      plain_string:
+        description: 'A simple string input'
+        required: true
+        default: 'hello world'
+
+      boolean_flag:
+        description: 'Enable feature?'
+        required: true
+        type: boolean
+        default: false
+
+      env_choice:
+        description: 'Environment'
+        required: true
+        type: choice
+        options:
+          - dev
+          - test
+          - prod
+        default: dev
+
+      multi_line_string:
+        description: 'Multi-line values (use __NEWLINE__ between lines)'
+        required: false
+        default: 'value1__NEWLINE__value2__NEWLINE__value3'
+
+      optional_input:
+        description: 'Optional parameter'
+        required: false
+
+jobs:
+  demo:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Show string input
+      run: |
+        echo "Plain string input: '${{ github.event.inputs.plain_string }}'"
+
+    - name: Show boolean input
+      run: |
+        if [ "${{ github.event.inputs.boolean_flag }}" = "true" ]; then
+          echo "✅ Feature is enabled"
+        else
+          echo "❌ Feature is disabled"
+        fi
+
+    - name: Use choice input
+      run: |
+        echo "Selected environment: ${{ github.event.inputs.env_choice }}"
+        case "${{ github.event.inputs.env_choice }}" in
+          dev)
+            echo "Running in development mode"
+            ;;
+          test)
+            echo "Running in testing mode"
+            ;;
+          prod)
+            echo "🚀 Production deployment triggered"
+            ;;
+        esac
+
+    - name: Handle multi-line values (simulated)
+      run: |
+        echo "Original multi-line string: ${{ github.event.inputs.multi_line_string }}"
+        echo "${{ github.event.inputs.multi_line_string }}" | sed 's/__NEWLINE__/\
+/g' > multiline.txt
+        echo "Parsed multi-line values:"
+        cat multiline.txt
+
+    - name: Use optional input safely
+      run: |
+        echo "Optional input was: '${{ github.event.inputs.optional_input || 'not provided' }}'"
+

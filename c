@@ -1,9 +1,25 @@
-curl --url "smtps://smtp.office365.com:465" \
-  --ssl-reqd \
-  --mail-from "your_email@outlook.com" \
-  --mail-rcpt "recipient@example.com" \
-  --user "your_email@outlook.com:your_app_password" \
-  --upload-file email.html \
-  --header "Subject: Test Email from curl (Outlook)" \
-  --header "From: Your Name <your_email@outlook.com>" \
-  --header "Content-Type: text/html"
+name: Fruit Action
+inputs:
+  fruit:
+    description: "Pick a fruit"
+    required: true
+    default: "apple"
+    type: choice
+    options:
+      - apple
+      - banana
+      - orange
+runs:
+  using: "composite"
+  steps:
+    - shell: bash
+      run: |
+        if [ "${{ inputs.fruit }}" = "apple" ]; then
+          echo "FRUIT=${{ secrets.FRUIT_APPLE }}" >> $GITHUB_ENV
+        elif [ "${{ inputs.fruit }}" = "banana" ]; then
+          echo "FRUIT=${{ secrets.FRUIT_BANANA }}" >> $GITHUB_ENV
+        elif [ "${{ inputs.fruit }}" = "orange" ]; then
+          echo "FRUIT=${{ secrets.FRUIT_ORANGE }}" >> $GITHUB_ENV
+        fi
+    - shell: bash
+      run: ./test "$FRUIT"

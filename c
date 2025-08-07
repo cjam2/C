@@ -1,62 +1,132 @@
-function loadJiraEpicsFromProductGroup(productGroupValue) {
-  var $epic = AJS.$('[name="jiraEpic"]'); // Change to your actual ConfiForms field name for the Jira Epic dropdown
+/* ConfiForms → Jira Epic loader
+   - Runs on load
+   - Uses AP.request (no CORS creds in browser)
+   - Source field:  name="ProductGroup"
+   - Target field:  name="jiraEpic"
+*/
 
-  function setLoading(isLoading) {
-    $epic.prop('disabled', isLoading);
-    if (isLoading) {
-      $epic.html('<option>Loading…</option>');
+(function () {
+  // ---- CONFIG ----
+  var SOURCE_FIELD_NAME = "ProductGroup"; // ConfiForms field name of the first dropdown
+  var TARGET_FIELD_NAME = "jiraEpic";     // ConfiForms field name of the Jira Epic dropdown
+  var SEARCH_MODE = "project";            // "project" | "label" | "summary"
+  var INCLUDE_DONE = false;               // include epics in Done status
+
+  // ---- BOOT LOG ----
+  console.log("[EpicLoader] Script loaded ✓");
+
+  // Utility: HTML-escape using jQuery
+  function escapeHtml(str) { return AJS.$("<div>").text(String(str || "")).html(); }
+
+  // Build JQL based on your ProductGroup meaning
+  function buildJql(productGroupValue) {
+    var base;
+    if (SEARCH_MODE === "label") {
+      base = 'issuetype=Epic AND labels = "' + productGroupValue + '"';
+    } else if (SEARCH_MODE === "summary") {
+      base = 'issuetype=Epic AND summary ~ "' + productGroupValue + '"';
+    } else {
+      // default: treat as Jira project key
+      base = 'project=' + productGroupValue + ' AND issuetype=Epic';
     }
+    if (!INCLUDE_DONE) base += ' AND statusCategory != Done';
+    return base + ' ORDER BY updated DESC';
   }
 
-  function fillOptions(issues) {
+  function setLoading($sel, isLoading) {
+    $sel.prop("disabled", isLoading);
+    $sel.html('<option>' + (isLoading ? 'Loading…' : 'Select an epic…') + '</option>');
+  }
+
+  function fillOptions($sel, issues) {
     if (!issues || !issues.length) {
-      $epic.html('<option value="">No epics found</option>');
+      $sel.html('<option value="">No epics found</option>');
       return;
     }
-    var opts = issues.map(function (it) {
+    var html = ['<option value="">Select an epic…</option>'];
+    for (var i = 0; i < issues.length; i++) {
+      var it = issues[i];
       var key = it.key;
-      var summary = (it.fields && it.fields.summary) || '';
-      var label = key + ' — ' + summary;
-      return '<option value="' + key + '">' + AJS.escapeHtml(label) + '</option>';
-    }).join('');
-    $epic.html('<option value="">Select an epic…</option>' + opts);
+      var summary = (it.fields && it.fields.summary) || "";
+      html.push('<option value="' + escapeHtml(key) + '">' + escapeHtml(key + " — " + summary) + "</option>");
+    }
+    $sel.html(html.join(""));
   }
 
-  // In your case, ProductGroup value will match a Jira project key
-  function buildJql(productGroupValue) {
-    return 'project=' + productGroupValue + ' AND issuetype=Epic AND statusCategory != Done ORDER BY updated DESC';
-  }
+  function loadEpics(productGroupValue, $target) {
+    if (!productGroupValue) {
+      $target.html('<option value="">Pick a product group first</option>');
+      return;
+    }
+    if (typeof AP === "undefined" || !AP.request) {
+      console.error("[EpicLoader] AP.request is unavailable. Are you running inside Confluence?");
+      $target.html('<option value="">AP.request unavailable</option>');
+      return;
+    }
 
-  if (!productGroupValue) {
-    $epic.html('<option value="">Pick a product group first</option>');
-    return;
-  }
+    setLoading($target, true);
+    var jql = buildJql(productGroupValue);
 
-  setLoading(true);
+    console.log("[EpicLoader] Querying Jira with JQL:", jql);
 
-  AP.request({
-    url: '/rest/api/2/search',
-    type: 'GET',
-    data: {
-      jql: buildJql(productGroupValue),
-      fields: 'key,summary',
-      maxResults: 200
-    },
-    success: function (resp) {
-      try {
-        var json = JSON.parse(resp);
-        fillOptions(json.issues || []);
-      } catch (e) {
-        console.error('Parse error', e);
-        $epic.html('<option value="">Error parsing response</option>');
-      } finally {
-        setLoading(false);
+    AP.request({
+      url: "/rest/api/2/search",
+      type: "GET",
+      data: {
+        jql: jql,
+        fields: "key,summary",
+        maxResults: 200
+      },
+      success: function (resp) {
+        try {
+          var data = JSON.parse(resp);
+          fillOptions($target, (data && data.issues) || []);
+          console.log("[EpicLoader] Loaded", (data && data.issues ? data.issues.length : 0), "epics");
+        } catch (e) {
+          console.error("[EpicLoader] Parse error:", e);
+          $target.html('<option value="">Error parsing response</option>');
+        } finally {
+          setLoading($target, false);
+        }
+      },
+      error: function (xhr) {
+        console.error("[EpicLoader] Jira search failed:", xhr && xhr.responseText);
+        $target.html('<option value="">Failed to load epics</option>');
+        setLoading($target, false);
       }
-    },
-    error: function (xhr) {
-      console.error('Jira search failed', xhr && xhr.responseText);
-      $epic.html('<option value="">Failed to load epics</option>');
-      setLoading(false);
+    });
+  }
+
+  // Run when Confluence is ready
+  AJS.toInit(function () {
+    var $ = AJS.$;
+    var $source = $('[name="' + SOURCE_FIELD_NAME + '"]');
+    var $target = $('[name="' + TARGET_FIELD_NAME + '"]');
+
+    if ($source.length === 0) {
+      console.error('[EpicLoader] Source field not found: name="' + SOURCE_FIELD_NAME + '"');
+      return;
+    }
+    if ($target.length === 0) {
+      console.error('[EpicLoader] Target field not found: name="' + TARGET_FIELD_NAME + '"');
+      return;
+    }
+
+    console.log("[EpicLoader] Wiring change handler");
+    var t = null;
+    $source.on("change", function () {
+      clearTimeout(t);
+      var val = $(this).val();
+      t = setTimeout(function () { loadEpics(val, $target); }, 120);
+    });
+
+    // Initial load if a value already exists
+    var initial = $source.val();
+    if (initial) {
+      console.log("[EpicLoader] Initial load for value:", initial);
+      loadEpics(initial, $target);
+    } else {
+      console.log("[EpicLoader] Waiting for ProductGroup selection…");
     }
   });
-}
+})();

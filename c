@@ -1,5 +1,5 @@
-function loadJiraEpics(productId) {
-  var $epic = AJS.$('[name="jiraEpic"]'); // your ConfiForms field name
+function loadJiraEpicsFromProductGroup(productGroupValue) {
+  var $epic = AJS.$('[name="jiraEpic"]'); // Change to your actual ConfiForms field name for the Jira Epic dropdown
 
   function setLoading(isLoading) {
     $epic.prop('disabled', isLoading);
@@ -22,13 +22,13 @@ function loadJiraEpics(productId) {
     $epic.html('<option value="">Select an epic…</option>' + opts);
   }
 
-  function buildJql(id) {
-    // Change this if productId is label or summary match
-    return 'project=' + id + ' AND issuetype=Epic AND statusCategory != Done ORDER BY updated DESC';
+  // In your case, ProductGroup value will match a Jira project key
+  function buildJql(productGroupValue) {
+    return 'project=' + productGroupValue + ' AND issuetype=Epic AND statusCategory != Done ORDER BY updated DESC';
   }
 
-  if (!productId) {
-    $epic.html('<option value="">Pick a product first</option>');
+  if (!productGroupValue) {
+    $epic.html('<option value="">Pick a product group first</option>');
     return;
   }
 
@@ -38,7 +38,7 @@ function loadJiraEpics(productId) {
     url: '/rest/api/2/search',
     type: 'GET',
     data: {
-      jql: buildJql(productId),
+      jql: buildJql(productGroupValue),
       fields: 'key,summary',
       maxResults: 200
     },

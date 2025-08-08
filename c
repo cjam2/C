@@ -5,67 +5,57 @@ AJS.toInit(function () {
   var TARGET = '[name="jiraEpic"]';
   var RAW    = '[name="jiraRaw"]';
 
-  function setLoading($sel, on) {
-    $sel.prop("disabled", on);
-    $sel.html('<option>' + (on ? 'Loading…' : 'Select an epic…') + '</option>');
+  function setLoading(on){
+    var $t = $(TARGET);
+    $t.prop('disabled', on)
+      .html('<option>' + (on ? 'Loading…' : 'Select an epic…') + '</option>');
   }
 
-  function fillFromRaw() {
+  function fillFromRaw(){
     var raw = $(RAW).val();
-    if (!raw) return false;
-    try {
+    if (!raw) return;
+    try{
       var data = JSON.parse(raw);
       var issues = (data && data.issues) || [];
-      var html = ['<option value="">Select an epic…</option>'];
-      for (var i = 0; i < issues.length; i++) {
+      var opts = ['<option value="">Select an epic…</option>'];
+      for (var i=0;i<issues.length;i++){
         var it = issues[i], key = it.key, summary = (it.fields && it.fields.summary) || '';
-        html.push('<option value="' + key + '">' + key + ' — ' + summary + '</option>');
+        opts.push('<option value="'+key+'">'+key+' — '+summary+'</option>');
       }
-      var $target = $(TARGET);
-      $target.html(html.join(''));
-      $target.prop('disabled', false);
+      $(TARGET).html(opts.join('')).prop('disabled', false);
       console.log('[EpicLoader] Loaded', issues.length, 'epics');
-      return true;
-    } catch (e) {
-      console.error('[EpicLoader] JSON parse failed for jiraRaw', e);
+    }catch(e){
+      console.error('[EpicLoader] Parse failed', e, raw);
       $(TARGET).html('<option value="">Error parsing Jira data</option>').prop('disabled', false);
-      return true;
     }
   }
 
-  // Poller that waits for IFTTT to write jiraRaw, with timeout
-  function waitAndFill(maxMs) {
-    var start = Date.now();
-    (function tick() {
-      if (fillFromRaw()) return;
-      if (Date.now() - start > maxMs) {
+  // Watch jiraRaw for changes (fires even though hidden)
+  $(document).on('change input', RAW, fillFromRaw);
+
+  // Also observe attribute/value changes for safety
+  var el = document.querySelector(RAW.replace(/^\[name="/,'[name="'));
+  if (el) {
+    new MutationObserver(function(){ fillFromRaw(); })
+      .observe(el, { attributes:true, childList:true, characterData:true, subtree:true });
+  }
+
+  // When ProductGroup changes, clear and show spinner
+  $(SOURCE).on('change', function(){
+    $(RAW).val('');           // clear old data; IFTTT will overwrite
+    setLoading(true);
+    // If nothing arrives after 30s, show timeout
+    setTimeout(function(){
+      if (!$(RAW).val()){
         $(TARGET).html('<option value="">Timed out waiting for Jira</option>').prop('disabled', false);
         console.warn('[EpicLoader] Timed out waiting for jiraRaw');
-        return;
       }
-      setTimeout(tick, 200);
-    })();
-  }
-
-  // Wire up
-  var $src = $(SOURCE), $tgt = $(TARGET), $raw = $(RAW);
-  if (!$src.length || !$tgt.length || !$raw.length) {
-    console.error('[EpicLoader] Missing fields. Found:', {src:$src.length, tgt:$tgt.length, raw:$raw.length});
-    return;
-  }
-
-  // When ProductGroup changes -> show spinner, clear old data, wait for IFTTT result
-  $src.on('change', function () {
-    // Clear jiraRaw so we know when new data arrives
-    $(RAW).val('');
-    setLoading($tgt, true);
-    waitAndFill(15000); // wait up to 15s
+    }, 30000);
   });
 
-  // Optional: if page loads with an existing ProductGroup, try once
-  if ($src.val()) {
-    setLoading($tgt, true);
-    waitAndFill(15000);
+  // If ProductGroup already set on load, kick it off
+  if ($(SOURCE).val()){
+    $(SOURCE).trigger('change');
   }
 });
 </script>

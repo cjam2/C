@@ -1,7 +1,7 @@
+<script src="https://connect-cdn.atl-paas.net/all.js"></script>
 <script>
 (function () {
   // ---- CONFIG ----
-  var JIRA_BASE_URL = "https://track.td.com";
   var SOURCE_FIELD_NAME = "ProductGroup"; // ConfiForms source dropdown
   var TARGET_FIELD_NAME = "jiraEpic";     // ConfiForms target dropdown
   var SUMMARY_FILTER = "RAD";             // text to match in epic summary
@@ -35,7 +35,7 @@
     var jql = 'issuetype=Epic AND project="' + productGroupValue +
               '" AND summary ~ "' + SUMMARY_FILTER + 
               '" AND status in (' + STATUS_LIST.join(",") + ')';
-    return JIRA_BASE_URL + "/rest/api/2/search?jql=" +
+    return "/rest/api/2/search?jql=" +
            encodeURIComponent(jql) + "&fields=key,summary&maxResults=200";
   }
 
@@ -47,30 +47,36 @@
     var apiUrl = buildApiUrl(productGroupValue);
     setLoading($target, true);
 
-    console.log("[EpicLoader] Fetching from:", apiUrl);
+    console.log("[EpicLoader] Querying Jira (AP.request):", apiUrl);
 
-    fetch(apiUrl, {
-      method: "GET",
-      credentials: "include", // uses your logged-in Jira session
-      headers: {
-        "Accept": "application/json"
-      }
-    })
-    .then(res => {
-      if (!res.ok) throw new Error("HTTP " + res.status);
-      return res.json();
-    })
-    .then(data => {
-      console.log("[EpicLoader] JSON response:", data);
-      fillOptions($target, data.issues || []);
-      console.log("[EpicLoader] Loaded", (data.issues || []).length, "epics");
-    })
-    .catch(err => {
-      console.error("[EpicLoader] Fetch failed:", err);
-      $target.html('<option value="">Failed to load epics</option>');
-    })
-    .finally(() => {
+    if (typeof AP === "undefined" || !AP.request) {
+      console.error("[EpicLoader] AP.request is unavailable. This must run in Confluence.");
+      $target.html('<option value="">AP.request unavailable</option>');
       setLoading($target, false);
+      return;
+    }
+
+    AP.request({
+      url: apiUrl,
+      type: "GET",
+      success: function (resp) {
+        try {
+          var data = JSON.parse(resp);
+          console.log("[EpicLoader] JSON response:", data);
+          fillOptions($target, data.issues || []);
+          console.log("[EpicLoader] Loaded", (data.issues || []).length, "epics");
+        } catch (e) {
+          console.error("[EpicLoader] Parse error:", e);
+          $target.html('<option value="">Error parsing response</option>');
+        } finally {
+          setLoading($target, false);
+        }
+      },
+      error: function (xhr) {
+        console.error("[EpicLoader] Jira search failed:", xhr && xhr.responseText);
+        $target.html('<option value="">Failed to load epics</option>');
+        setLoading($target, false);
+      }
     });
   }
 

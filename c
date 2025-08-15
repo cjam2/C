@@ -5,34 +5,30 @@ AJS.toInit(function () {
   // ---------- CONFIG ----------
   var JIRA_BASE = "https://track.td.com";
 
-  var PRODUCT_SEL  = '[name="ProductGroup"]';   // ConfiForms ProductGroup field (project key)
-  var PLATFORM_SEL = '[name="Platform"]';       // ConfiForms Platform field
+  var PLATFORM_SEL   = '[name="Platform"]';       // pick this FIRST
+  var PRODUCT_SEL    = '[name="ProductGroup"]';   // then this one
 
-  var SUMMARY_FILTER = 'RAD';                   // optional; set '' to disable
-  var STATUS_LIST    = ['"In Progress"', '"Refining"']; // optional; set [] to disable
+  // Optional filters; set '' or [] to disable
+  var SUMMARY_FILTER = 'RAD';
+  var STATUS_LIST    = ['"In Progress"', '"Refining"'];
 
-  // If you want Platform to be REQUIRED before we build the JQL:
-  var REQUIRE_PLATFORM = true;
+  // Include Platform as a JQL clause? (set to Jira field name or custom field id, e.g. 'Platform' or 'cf[12345]')
+  var PLATFORM_FIELD_IN_JQL = ''; // leave blank if Platform is just a gate, not a filter
 
-  // If you want Platform to be INCLUDED in JQL, set the Jira field name here.
-  // Examples: 'Platform' (for a system/custom field with that name) or 'cf[12345]'
-  // Leave empty ('') to not include Platform in JQL.
-  var PLATFORM_FIELD_IN_JQL = ''; // e.g. 'Platform' or 'cf[12345]'
-
-  // If ProductGroup isn't the actual project key, map it here:
+  // If ProductGroup values are NOT the Jira project key, map them here:
   var PROJECT_MAP = {
     // "UI label": "PROJECTKEY"
   };
 
   // ---------- ELEMENTS ----------
-  var $pg   = $(PRODUCT_SEL);
   var $plat = $(PLATFORM_SEL);
+  var $pg   = $(PRODUCT_SEL);
   var $jql  = $("#epic-jql");
   var $link = $("#epic-link");
   var $frame= $("#epic-preview");
 
+  if (!$plat.length) { console.error('[EpicPanel] Platform field not found:', PLATFORM_SEL); return; }
   if (!$pg.length)   { console.error('[EpicPanel] ProductGroup field not found:', PRODUCT_SEL); return; }
-  if (!$plat.length) { console.warn('[EpicPanel] Platform field not found:', PLATFORM_SEL, '(continuing)'); }
 
   // ---------- HELPERS ----------
   function resolveProject(val){ return (PROJECT_MAP[val] || val || '').trim(); }
@@ -46,9 +42,7 @@ AJS.toInit(function () {
     if (STATUS_LIST && STATUS_LIST.length){
       jql += ' AND status in (' + STATUS_LIST.join(',') + ')';
     }
-    // Optional: include Platform in JQL
     if (PLATFORM_FIELD_IN_JQL && platformVal){
-      // exact match; tweak to ~ for contains if you prefer
       jql += ' AND "' + PLATFORM_FIELD_IN_JQL + '" = "' + platformVal + '"';
     }
     jql += ' ORDER BY updated DESC';
@@ -57,49 +51,47 @@ AJS.toInit(function () {
 
   function issueNavUrl(jql){ return JIRA_BASE + '/issues/?jql=' + encodeURIComponent(jql); }
 
-  var lastApplied = { pg:null, plat:null };
+  var last = { pg:null, plat:null };
 
-  function maybeUpdate(){
-    var pgVal   = resolveProject($pg.val());
+  function updatePanel(){
     var platVal = ($plat.val() || '').trim();
+    if (!platVal){
+      // Require Platform first; show hint
+      $jql.text('(select a Platform first)');
+      $link.attr('href', '#');
+      $frame.attr('src', 'about:blank');
+      last = { pg:null, plat:null };
+      return;
+    }
 
-    // Gate: if Platform is required, do nothing until it's chosen
-    if (!pgVal) {
+    var pgVal = resolveProject($pg.val());
+    if (!pgVal){
+      // Platform is set, but no ProductGroup yet
       $jql.text('(select a ProductGroup)');
-      $link.attr('href', '#'); $frame.attr('src','about:blank');
-      return;
-    }
-    if (REQUIRE_PLATFORM && !$plat.length){
-      console.warn('[EpicPanel] REQUIRE_PLATFORM is true but Platform field not found.');
-    }
-    if (REQUIRE_PLATFORM && !platVal){
-      $jql.text('(select a Platform)');
-      $link.attr('href', '#'); $frame.attr('src','about:blank');
+      $link.attr('href', '#');
+      $frame.attr('src', 'about:blank');
+      last = { pg:null, plat:platVal };
       return;
     }
 
-    // Avoid redundant reloads
-    if (lastApplied.pg === pgVal && lastApplied.plat === platVal) return;
+    // Skip redundant refresh
+    if (last.pg === pgVal && last.plat === platVal) return;
 
     var jql = buildJql(pgVal, platVal);
-    if (!jql){ return; }
-
     var url = issueNavUrl(jql);
+
     $jql.text(jql);
     $link.attr('href', url);
     $frame.attr('src', url); // may be blocked by X-Frame-Options; link still works
 
-    lastApplied.pg   = pgVal;
-    lastApplied.plat = platVal;
+    last = { pg: pgVal, plat: platVal };
   }
 
   // ---------- EVENTS ----------
   var t=null;
-  $pg.on('change', function(){ clearTimeout(t); t=setTimeout(maybeUpdate, 120); });
-  $plat.on('change', function(){ clearTimeout(t); t=setTimeout(maybeUpdate, 120); });
+  $plat.on('change', function(){ clearTimeout(t); t=setTimeout(updatePanel, 120); });
+  $pg.on('change',   function(){ clearTimeout(t); t=setTimeout(updatePanel, 120); });
 
-  // Do NOT auto-update on initial load—only after user picks fields
-  // (If you want initial attempt, uncomment next line)
-  // maybeUpdate();
+  // Do NOT update on load; we wait for Platform first.
 });
 </script>

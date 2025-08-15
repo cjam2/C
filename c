@@ -2,39 +2,37 @@
 AJS.toInit(function () {
   var $ = AJS.$;
 
-  // ---------- CONFIG ----------
+  // ---- CONFIG ----
   var JIRA_BASE = "https://track.td.com";
-
-  var PLATFORM_SEL   = '[name="Platform"]';       // pick this FIRST
-  var PRODUCT_SEL    = '[name="ProductGroup"]';   // then this one
+  var PLATFORM_SEL   = '[name="Platform"]';       // select this first (but we don't listen to it)
+  var PRODUCT_SEL    = '[name="ProductGroup"]';   // we ONLY listen to this
 
   // Optional filters; set '' or [] to disable
   var SUMMARY_FILTER = 'RAD';
   var STATUS_LIST    = ['"In Progress"', '"Refining"'];
 
-  // Include Platform as a JQL clause? (set to Jira field name or custom field id, e.g. 'Platform' or 'cf[12345]')
-  var PLATFORM_FIELD_IN_JQL = ''; // leave blank if Platform is just a gate, not a filter
+  // Include Platform in JQL? put Jira field name or custom field id, else leave ''
+  var PLATFORM_FIELD_IN_JQL = ''; // e.g. 'Platform' or 'cf[12345]'
 
-  // If ProductGroup values are NOT the Jira project key, map them here:
+  // If ProductGroup values aren't actual project keys, map here:
   var PROJECT_MAP = {
     // "UI label": "PROJECTKEY"
   };
 
-  // ---------- ELEMENTS ----------
+  // ---- ELEMENTS ----
   var $plat = $(PLATFORM_SEL);
   var $pg   = $(PRODUCT_SEL);
   var $jql  = $("#epic-jql");
   var $link = $("#epic-link");
   var $frame= $("#epic-preview");
 
-  if (!$plat.length) { console.error('[EpicPanel] Platform field not found:', PLATFORM_SEL); return; }
   if (!$pg.length)   { console.error('[EpicPanel] ProductGroup field not found:', PRODUCT_SEL); return; }
+  if (!$plat.length) { console.warn('[EpicPanel] Platform field not found:', PLATFORM_SEL); }
 
-  // ---------- HELPERS ----------
+  // ---- HELPERS ----
   function resolveProject(val){ return (PROJECT_MAP[val] || val || '').trim(); }
 
   function buildJql(projectKey, platformVal){
-    if (!projectKey) return '';
     var jql = 'issuetype=Epic AND project="' + projectKey + '"';
     if (SUMMARY_FILTER && SUMMARY_FILTER.trim()){
       jql += ' AND summary ~ "' + SUMMARY_FILTER + '"';
@@ -45,37 +43,30 @@ AJS.toInit(function () {
     if (PLATFORM_FIELD_IN_JQL && platformVal){
       jql += ' AND "' + PLATFORM_FIELD_IN_JQL + '" = "' + platformVal + '"';
     }
-    jql += ' ORDER BY updated DESC';
-    return jql;
+    return jql + ' ORDER BY updated DESC';
   }
 
   function issueNavUrl(jql){ return JIRA_BASE + '/issues/?jql=' + encodeURIComponent(jql); }
 
-  var last = { pg:null, plat:null };
-
-  function updatePanel(){
+  // ---- MAIN: only on ProductGroup change ----
+  function onProductGroupChange(){
+    var pgVal   = resolveProject($pg.val());
     var platVal = ($plat.val() || '').trim();
+
     if (!platVal){
-      // Require Platform first; show hint
+      // Platform not selected yet → tell user and wait
       $jql.text('(select a Platform first)');
       $link.attr('href', '#');
-      $frame.attr('src', 'about:blank');
-      last = { pg:null, plat:null };
+      $frame.attr('src','about:blank');
       return;
     }
-
-    var pgVal = resolveProject($pg.val());
     if (!pgVal){
-      // Platform is set, but no ProductGroup yet
+      // ProductGroup missing → tell user
       $jql.text('(select a ProductGroup)');
       $link.attr('href', '#');
-      $frame.attr('src', 'about:blank');
-      last = { pg:null, plat:platVal };
+      $frame.attr('src','about:blank');
       return;
     }
-
-    // Skip redundant refresh
-    if (last.pg === pgVal && last.plat === platVal) return;
 
     var jql = buildJql(pgVal, platVal);
     var url = issueNavUrl(jql);
@@ -83,15 +74,15 @@ AJS.toInit(function () {
     $jql.text(jql);
     $link.attr('href', url);
     $frame.attr('src', url); // may be blocked by X-Frame-Options; link still works
-
-    last = { pg: pgVal, plat: platVal };
   }
 
-  // ---------- EVENTS ----------
+  // Listen ONLY to ProductGroup changes (per your flow)
   var t=null;
-  $plat.on('change', function(){ clearTimeout(t); t=setTimeout(updatePanel, 120); });
-  $pg.on('change',   function(){ clearTimeout(t); t=setTimeout(updatePanel, 120); });
+  $pg.on('change', function(){ clearTimeout(t); t = setTimeout(onProductGroupChange, 120); });
 
-  // Do NOT update on load; we wait for Platform first.
+  // On initial page load, show a neutral hint (don’t auto-run)
+  $jql.text('(select a Platform, then select a ProductGroup)');
+  $link.attr('href', '#');
+  $frame.attr('src', 'about:blank');
 });
 </script>

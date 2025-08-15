@@ -1,99 +1,105 @@
-<!-- Dynamic Epic Query Panel -->
-<div id="epic-query-panel" style="border:1px solid #ddd;border-radius:8px;padding:12px;margin:12px 0;">
-  <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
-    <strong>Current JQL:</strong>
-    <code id="epic-jql" style="background:#f7f7f7;padding:4px 6px;border-radius:4px;max-width:100%;overflow:auto;">
-      (select a ProductGroup)
-    </code>
-    <a id="epic-link" href="#" target="_blank" rel="noopener" style="margin-left:auto;">
-      Open in Jira ↗
-    </a>
-  </div>
-
-  <!-- Optional inline preview (might be blocked by X-Frame-Options on your Jira) -->
-  <div id="epic-preview-wrap" style="margin-top:10px;">
-    <iframe id="epic-preview" src="about:blank" style="width:100%;height:520px;border:1px solid #eee;border-radius:6px;"></iframe>
-    <div style="font-size:12px;color:#666;margin-top:6px;">
-      If the preview doesn’t load, click “Open in Jira.” Some Jira instances block embedding.
-    </div>
-  </div>
-</div>
-
 <script>
 AJS.toInit(function () {
   var $ = AJS.$;
 
-  // ---- CONFIG ----
-  var JIRA_BASE = "https://track.td.com";                 // your Jira base
-  var SOURCE_SEL = '[name="ProductGroup"]';               // ConfiForms field (adjust if your name differs)
-  var SUMMARY_FILTER = 'RAD';                             // remove or change if not needed
-  var STATUS_LIST = ['"In Progress"', '"Refining"'];      // remove or edit if needed
+  // ---------- CONFIG ----------
+  var JIRA_BASE = "https://track.td.com";
 
-  // If ProductGroup values are NOT project keys, map them here:
+  var PRODUCT_SEL  = '[name="ProductGroup"]';   // ConfiForms ProductGroup field (project key)
+  var PLATFORM_SEL = '[name="Platform"]';       // ConfiForms Platform field
+
+  var SUMMARY_FILTER = 'RAD';                   // optional; set '' to disable
+  var STATUS_LIST    = ['"In Progress"', '"Refining"']; // optional; set [] to disable
+
+  // If you want Platform to be REQUIRED before we build the JQL:
+  var REQUIRE_PLATFORM = true;
+
+  // If you want Platform to be INCLUDED in JQL, set the Jira field name here.
+  // Examples: 'Platform' (for a system/custom field with that name) or 'cf[12345]'
+  // Leave empty ('') to not include Platform in JQL.
+  var PLATFORM_FIELD_IN_JQL = ''; // e.g. 'Platform' or 'cf[12345]'
+
+  // If ProductGroup isn't the actual project key, map it here:
   var PROJECT_MAP = {
-    // "UI label" : "PROJECTKEY"
-    // e.g. "Core-IM1": "COREIM1"
+    // "UI label": "PROJECTKEY"
   };
 
-  // ---- ELEMENTS ----
-  var $src   = $(SOURCE_SEL);
-  var $jqlEl = $("#epic-jql");
-  var $link  = $("#epic-link");
-  var $frame = $("#epic-preview");
+  // ---------- ELEMENTS ----------
+  var $pg   = $(PRODUCT_SEL);
+  var $plat = $(PLATFORM_SEL);
+  var $jql  = $("#epic-jql");
+  var $link = $("#epic-link");
+  var $frame= $("#epic-preview");
 
-  function resolveProject(val) {
-    if (!val) return '';
-    return PROJECT_MAP[val] || val; // assume it's already a key if not in map
-  }
+  if (!$pg.length)   { console.error('[EpicPanel] ProductGroup field not found:', PRODUCT_SEL); return; }
+  if (!$plat.length) { console.warn('[EpicPanel] Platform field not found:', PLATFORM_SEL, '(continuing)'); }
 
-  function buildJql(projectKey) {
+  // ---------- HELPERS ----------
+  function resolveProject(val){ return (PROJECT_MAP[val] || val || '').trim(); }
+
+  function buildJql(projectKey, platformVal){
     if (!projectKey) return '';
     var jql = 'issuetype=Epic AND project="' + projectKey + '"';
-    if (SUMMARY_FILTER && SUMMARY_FILTER.trim()) {
+    if (SUMMARY_FILTER && SUMMARY_FILTER.trim()){
       jql += ' AND summary ~ "' + SUMMARY_FILTER + '"';
     }
-    if (STATUS_LIST && STATUS_LIST.length) {
+    if (STATUS_LIST && STATUS_LIST.length){
       jql += ' AND status in (' + STATUS_LIST.join(',') + ')';
+    }
+    // Optional: include Platform in JQL
+    if (PLATFORM_FIELD_IN_JQL && platformVal){
+      // exact match; tweak to ~ for contains if you prefer
+      jql += ' AND "' + PLATFORM_FIELD_IN_JQL + '" = "' + platformVal + '"';
     }
     jql += ' ORDER BY updated DESC';
     return jql;
   }
 
-  function issueNavUrl(jql) {
-    return JIRA_BASE + '/issues/?jql=' + encodeURIComponent(jql);
-  }
+  function issueNavUrl(jql){ return JIRA_BASE + '/issues/?jql=' + encodeURIComponent(jql); }
 
-  function updatePanel() {
-    var srcVal = ($src.val() || '').trim();
-    var projectKey = resolveProject(srcVal);
+  var lastApplied = { pg:null, plat:null };
 
-    if (!projectKey) {
-      $jqlEl.text('(select a ProductGroup)');
-      $link.attr('href', '#');
-      $frame.attr('src', 'about:blank');
+  function maybeUpdate(){
+    var pgVal   = resolveProject($pg.val());
+    var platVal = ($plat.val() || '').trim();
+
+    // Gate: if Platform is required, do nothing until it's chosen
+    if (!pgVal) {
+      $jql.text('(select a ProductGroup)');
+      $link.attr('href', '#'); $frame.attr('src','about:blank');
+      return;
+    }
+    if (REQUIRE_PLATFORM && !$plat.length){
+      console.warn('[EpicPanel] REQUIRE_PLATFORM is true but Platform field not found.');
+    }
+    if (REQUIRE_PLATFORM && !platVal){
+      $jql.text('(select a Platform)');
+      $link.attr('href', '#'); $frame.attr('src','about:blank');
       return;
     }
 
-    var jql = buildJql(projectKey);
+    // Avoid redundant reloads
+    if (lastApplied.pg === pgVal && lastApplied.plat === platVal) return;
+
+    var jql = buildJql(pgVal, platVal);
+    if (!jql){ return; }
+
     var url = issueNavUrl(jql);
-
-    $jqlEl.text(jql);
+    $jql.text(jql);
     $link.attr('href', url);
-    $frame.attr('src', url); // may be blocked by X-Frame-Options on Jira
+    $frame.attr('src', url); // may be blocked by X-Frame-Options; link still works
+
+    lastApplied.pg   = pgVal;
+    lastApplied.plat = platVal;
   }
 
-  if (!$src.length) {
-    console.error('[EpicPanel] Could not find ProductGroup field:', SOURCE_SEL);
-    return;
-  }
+  // ---------- EVENTS ----------
+  var t=null;
+  $pg.on('change', function(){ clearTimeout(t); t=setTimeout(maybeUpdate, 120); });
+  $plat.on('change', function(){ clearTimeout(t); t=setTimeout(maybeUpdate, 120); });
 
-  var t = null;
-  $src.on('change', function(){
-    clearTimeout(t);
-    t = setTimeout(updatePanel, 120);
-  });
-
-  // Initial render
-  updatePanel();
+  // Do NOT auto-update on initial load—only after user picks fields
+  // (If you want initial attempt, uncomment next line)
+  // maybeUpdate();
 });
 </script>

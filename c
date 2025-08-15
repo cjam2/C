@@ -1,88 +1,99 @@
+<!-- Dynamic JQL Panel -->
+<div id="epic-query-panel" style="border:1px solid #ddd;border-radius:8px;padding:12px;margin:12px 0;">
+  <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+    <strong>Current JQL:</strong>
+    <code id="epic-jql" style="background:#f7f7f7;padding:4px 6px;border-radius:4px;max-width:100%;overflow:auto;">
+      (select a ProductGroup)
+    </code>
+    <a id="epic-link" href="#" target="_blank" rel="noopener" style="margin-left:auto;">Open in Jira ↗</a>
+  </div>
+
+  <!-- Optional inline preview (may be blocked by Jira's X-Frame-Options) -->
+  <div style="margin-top:10px;">
+    <iframe id="epic-preview" src="about:blank"
+            style="width:100%;height:520px;border:1px solid #eee;border-radius:6px;"></iframe>
+    <div style="font-size:12px;color:#666;margin-top:6px;">
+      If the preview doesn’t load, click “Open in Jira.” Some Jira instances block embedding.
+    </div>
+  </div>
+</div>
+
 <script>
 AJS.toInit(function () {
   var $ = AJS.$;
 
-  // ---- CONFIG ----
-  var JIRA_BASE = "https://track.td.com";
-  var PLATFORM_SEL   = '[name="Platform"]';       // select this first (but we don't listen to it)
-  var PRODUCT_SEL    = '[name="ProductGroup"]';   // we ONLY listen to this
+  // ----- CONFIG -----
+  var JIRA_BASE = "https://track.td.com";                 // your Jira base URL
+  var SOURCE_SEL = '[name="ProductGroup"]';               // ConfiForms ProductGroup field
+  var SUMMARY_FILTER = 'RAD';                             // optional text filter
+  var STATUS_LIST = ['"In Progress"', '"Refining"'];      // optional status filter
 
-  // Optional filters; set '' or [] to disable
-  var SUMMARY_FILTER = 'RAD';
-  var STATUS_LIST    = ['"In Progress"', '"Refining"'];
-
-  // Include Platform in JQL? put Jira field name or custom field id, else leave ''
-  var PLATFORM_FIELD_IN_JQL = ''; // e.g. 'Platform' or 'cf[12345]'
-
-  // If ProductGroup values aren't actual project keys, map here:
+  // If ProductGroup values are *labels* not keys, map them here:
   var PROJECT_MAP = {
-    // "UI label": "PROJECTKEY"
+    // "UI Label" : "PROJECTKEY"
+    // "Core-IM1": "COREIM1"
   };
 
-  // ---- ELEMENTS ----
-  var $plat = $(PLATFORM_SEL);
-  var $pg   = $(PRODUCT_SEL);
-  var $jql  = $("#epic-jql");
-  var $link = $("#epic-link");
-  var $frame= $("#epic-preview");
+  // ----- ELEMENTS -----
+  var $src   = $(SOURCE_SEL);
+  var $jqlEl = $("#epic-jql");
+  var $link  = $("#epic-link");
+  var $frame = $("#epic-preview");
 
-  if (!$pg.length)   { console.error('[EpicPanel] ProductGroup field not found:', PRODUCT_SEL); return; }
-  if (!$plat.length) { console.warn('[EpicPanel] Platform field not found:', PLATFORM_SEL); }
+  function toProjectKey(v) { return PROJECT_MAP[v] || v || ""; }
 
-  // ---- HELPERS ----
-  function resolveProject(val){ return (PROJECT_MAP[val] || val || '').trim(); }
-
-  function buildJql(projectKey, platformVal){
+  function buildJql(projectKey) {
+    if (!projectKey) return "";
     var jql = 'issuetype=Epic AND project="' + projectKey + '"';
-    if (SUMMARY_FILTER && SUMMARY_FILTER.trim()){
+    if (SUMMARY_FILTER && SUMMARY_FILTER.trim()) {
       jql += ' AND summary ~ "' + SUMMARY_FILTER + '"';
     }
-    if (STATUS_LIST && STATUS_LIST.length){
+    if (STATUS_LIST && STATUS_LIST.length) {
       jql += ' AND status in (' + STATUS_LIST.join(',') + ')';
-    }
-    if (PLATFORM_FIELD_IN_JQL && platformVal){
-      jql += ' AND "' + PLATFORM_FIELD_IN_JQL + '" = "' + platformVal + '"';
     }
     return jql + ' ORDER BY updated DESC';
   }
 
-  function issueNavUrl(jql){ return JIRA_BASE + '/issues/?jql=' + encodeURIComponent(jql); }
-
-  // ---- MAIN: only on ProductGroup change ----
-  function onProductGroupChange(){
-    var pgVal   = resolveProject($pg.val());
-    var platVal = ($plat.val() || '').trim();
-
-    if (!platVal){
-      // Platform not selected yet → tell user and wait
-      $jql.text('(select a Platform first)');
-      $link.attr('href', '#');
-      $frame.attr('src','about:blank');
-      return;
-    }
-    if (!pgVal){
-      // ProductGroup missing → tell user
-      $jql.text('(select a ProductGroup)');
-      $link.attr('href', '#');
-      $frame.attr('src','about:blank');
-      return;
-    }
-
-    var jql = buildJql(pgVal, platVal);
-    var url = issueNavUrl(jql);
-
-    $jql.text(jql);
-    $link.attr('href', url);
-    $frame.attr('src', url); // may be blocked by X-Frame-Options; link still works
+  function buildIssueNavUrl(jql) {
+    // Use Issue Navigator with a cache-busting param so the iframe refreshes
+    var url = JIRA_BASE + '/issues/?jql=' + encodeURIComponent(jql);
+    return url + (url.indexOf('?')>-1 ? '&' : '?') + '_ts=' + Date.now();
   }
 
-  // Listen ONLY to ProductGroup changes (per your flow)
-  var t=null;
-  $pg.on('change', function(){ clearTimeout(t); t = setTimeout(onProductGroupChange, 120); });
+  function updatePanel() {
+    var raw = ($src.val() || "").trim();
+    var projectKey = toProjectKey(raw);
 
-  // On initial page load, show a neutral hint (don’t auto-run)
-  $jql.text('(select a Platform, then select a ProductGroup)');
-  $link.attr('href', '#');
-  $frame.attr('src', 'about:blank');
+    if (!projectKey) {
+      $jqlEl.text('(select a ProductGroup)');
+      $link.attr('href', '#');
+      $frame.attr('src', 'about:blank');
+      return;
+    }
+
+    var jql = buildJql(projectKey);
+    var url = buildIssueNavUrl(jql);
+
+    // Update visible JQL, link, and iframe preview
+    $jqlEl.text(jql);
+    $link.attr('href', url);
+    $frame.attr('src', url);
+    console.log('[EpicPanel] Updated JQL:', jql);
+  }
+
+  if (!$src.length) {
+    console.error('[EpicPanel] ProductGroup field not found:', SOURCE_SEL);
+    return;
+  }
+
+  // Debounced change handler
+  var t = null;
+  $src.on('change', function () {
+    clearTimeout(t);
+    t = setTimeout(updatePanel, 120);
+  });
+
+  // Initial paint (in case a value is preselected)
+  updatePanel();
 });
 </script>

@@ -1,25 +1,30 @@
-rem === 3a) List files created in /tmp/outputs on remote ===
-set "REMOTE_FILES_LIST="
-for /f "usebackq delims=" %%F in (`
-  plink.exe -batch -P %PORT% -pw "%PASS%" %HKFLAG% -ssh %USER%@!SERVER! ^
-    "find /tmp/outputs -type f 2>/dev/null"
-`) do (
-  set "REMOTE_FILES_LIST=!REMOTE_FILES_LIST! %%F"
-)
+rem === Choose the remote dir whose files you want to pull ===
+set "REMOTE_PICK_DIR=%REMOTE_DIR%"   rem e.g. /tmp or /tmp/outputs
 
-if defined REMOTE_FILES_LIST (
-  echo [INFO] Files to download from !SERVER!: !REMOTE_FILES_LIST!
-  for %%F in (!REMOTE_FILES_LIST!) do (
-    echo [STEP] Downloading %%F ...
-    pscp.exe -q -batch -P %PORT% -pw "%PASS%" %HKFLAG% %USER%@!SERVER!:"%%F" "%OUT_DIR%\"
-    if errorlevel 1 (
-      echo [WARN] Failed to download %%F from !SERVER!
-    )
-  )
-) else (
-  echo [INFO] No extra files found on !SERVER!.
-)
+rem === Where to save locally ===
+set "DL_DIR=%USERPROFILE%\Downloads"
 
-rem === 3b) Optionally clean up remote output folder ===
+rem === Get a newline-separated list of files (no recursion) to a temp file ===
+set "TMP_LIST=%TEMP%\files_!SERVER!_!TS!.txt"
 plink.exe -batch -P %PORT% -pw "%PASS%" %HKFLAG% -ssh %USER%@!SERVER! ^
-  "rm -rf /tmp/outputs" || echo [WARN] Could not remove /tmp/outputs on !SERVER!
+  "find '%REMOTE_PICK_DIR%' -maxdepth 1 -type f -printf '%%p\n'" > "%TMP_LIST%"
+
+rem === Download each file and delete it on remote if success ===
+for /f "usebackq delims=" %%F in ("%TMP_LIST%") do (
+  set "REMOTE_FILE=%%F"
+  set "BASE=%%~nxF"
+  set "LOCAL_FILE=%DL_DIR%\!SERVER!_!BASE!"
+  echo [STEP] Downloading "%%F" -> "!LOCAL_FILE!"
+
+  pscp.exe -q -batch -P %PORT% -pw "%PASS%" %HKFLAG% ^
+    %USER%@!SERVER!:"%%F" "!LOCAL_FILE!"
+  if errorlevel 1 (
+    echo [WARN] Download failed for %%F (kept on server)
+  ) else (
+    echo [INFO] Downloaded. Deleting remote file...
+    plink.exe -batch -P %PORT% -pw "%PASS%" %HKFLAG% -ssh %USER%@!SERVER! ^
+      "rm -f -- '%%F'" || echo [WARN] Could not delete %%F on server
+  )
+)
+
+del "%TMP_LIST%" 2>nul

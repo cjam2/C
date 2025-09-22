@@ -1,32 +1,25 @@
-rem 2a) Get remote timestamp (server time)
-set "TS="
-for /f "usebackq delims=" %%T in (`
+rem === 3a) List files created in /tmp/outputs on remote ===
+set "REMOTE_FILES_LIST="
+for /f "usebackq delims=" %%F in (`
   plink.exe -batch -P %PORT% -pw "%PASS%" %HKFLAG% -ssh %USER%@!SERVER! ^
-    "date +%%Y%%m%%d_%%H%%M%%S"
-`) do set "TS=%%T"
-
-if not defined TS (
-  echo [ERROR] Could not read remote timestamp from !SERVER!
-  exit /b
+    "find /tmp/outputs -type f 2>/dev/null"
+`) do (
+  set "REMOTE_FILES_LIST=!REMOTE_FILES_LIST! %%F"
 )
 
-rem 2b) Build the remote output path locally (uses server IP + server timestamp)
-set "REMOTE_OUT_PATH=%REMOTE_DIR%/!SERVER!_!TS!.log"
-echo [INFO] Using remote output: !REMOTE_OUT_PATH!
+if defined REMOTE_FILES_LIST (
+  echo [INFO] Files to download from !SERVER!: !REMOTE_FILES_LIST!
+  for %%F in (!REMOTE_FILES_LIST!) do (
+    echo [STEP] Downloading %%F ...
+    pscp.exe -q -batch -P %PORT% -pw "%PASS%" %HKFLAG% %USER%@!SERVER!:"%%F" "%OUT_DIR%\"
+    if errorlevel 1 (
+      echo [WARN] Failed to download %%F from !SERVER!
+    )
+  )
+) else (
+  echo [INFO] No extra files found on !SERVER!.
+)
 
-rem 2c) Make the uploaded script executable
+rem === 3b) Optionally clean up remote output folder ===
 plink.exe -batch -P %PORT% -pw "%PASS%" %HKFLAG% -ssh %USER%@!SERVER! ^
-  "chmod +x '%REMOTE_DIR%/%REMOTE_SH_NAME%'"
-if errorlevel 1 (
-  echo [ERROR] chmod failed on !SERVER!
-  exit /b
-)
-
-rem 2d) Run the script and redirect both stdout+stderr to the remote log
-rem     (bash -lc ensures PATH/shell init; careful with quotes)
-plink.exe -batch -P %PORT% -pw "%PASS%" %HKFLAG% -ssh %USER%@!SERVER! ^
-  bash -lc "'%REMOTE_DIR%/%REMOTE_SH_NAME%' > '!REMOTE_OUT_PATH!' 2>&1"
-if errorlevel 1 (
-  echo [ERROR] Remote execution failed on !SERVER!
-  exit /b
-)
+  "rm -rf /tmp/outputs" || echo [WARN] Could not remove /tmp/outputs on !SERVER!

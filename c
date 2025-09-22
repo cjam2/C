@@ -1,30 +1,26 @@
-rem === Choose the remote dir whose files you want to pull ===
-set "REMOTE_PICK_DIR=%REMOTE_DIR%"   rem e.g. /tmp or /tmp/outputs
+rem --- We are already inside :process_server with setlocal EnableDelayedExpansion ---
+rem TMP_LIST contains one absolute path per line (only files starting with 10.*)
 
-rem === Where to save locally ===
-set "DL_DIR=%USERPROFILE%\Downloads"
-
-rem === Get a newline-separated list of files (no recursion) to a temp file ===
-set "TMP_LIST=%TEMP%\files_!SERVER!_!TS!.txt"
-plink.exe -batch -P %PORT% -pw "%PASS%" %HKFLAG% -ssh %USER%@!SERVER! ^
-  "find '%REMOTE_PICK_DIR%' -maxdepth 1 -type f -printf '%%p\n'" > "%TMP_LIST%"
-
-rem === Download each file and delete it on remote if success ===
-for /f "usebackq delims=" %%F in ("%TMP_LIST%") do (
+for /f "usebackq delims= eol=" %%F in ("%TMP_LIST%") do (
+  rem 1) Read the line into a var and strip any trailing CR
   set "REMOTE_FILE=%%F"
-  set "BASE=%%~nxF"
-  set "LOCAL_FILE=%DL_DIR%\!SERVER!_!BASE!"
-  echo [STEP] Downloading "%%F" -> "!LOCAL_FILE!"
+  for /f "delims=" %%A in ("!REMOTE_FILE!") do set "REMOTE_FILE=%%~A"
 
-  pscp.exe -q -batch -P %PORT% -pw "%PASS%" %HKFLAG% ^
-    %USER%@!SERVER!:"%%F" "!LOCAL_FILE!"
-  if errorlevel 1 (
-    echo [WARN] Download failed for %%F (kept on server)
-  ) else (
-    echo [INFO] Downloaded. Deleting remote file...
-    plink.exe -batch -P %PORT% -pw "%PASS%" %HKFLAG% -ssh %USER%@!SERVER! ^
-      "rm -f -- '%%F'" || echo [WARN] Could not delete %%F on server
+  rem 2) Skip blank lines defensively
+  if not "!REMOTE_FILE!"=="" (
+    rem 3) Build a unique local name in Downloads (handles spaces)
+    set "BASE=%%~nxF"
+    set "LOCAL_FILE=%USERPROFILE%\Downloads\!SERVER!_!BASE!"
+
+    echo [STEP] Downloading "!REMOTE_FILE!" -> "!LOCAL_FILE!"
+    pscp.exe -q -batch -P %PORT% -pw "%PASS%" %HKFLAG% ^
+      %USER%@!SERVER!:"!REMOTE_FILE!" "!LOCAL_FILE!"
+    if errorlevel 1 (
+      echo [WARN] Download failed: !REMOTE_FILE!
+    ) else (
+      echo [INFO] Deleting remote file: !REMOTE_FILE!
+      plink.exe -batch -P %PORT% -pw "%PASS%" %HKFLAG% -ssh %USER%@!SERVER! ^
+        "rm -f -- '!REMOTE_FILE!'"
+    )
   )
 )
-
-del "%TMP_LIST%" 2>nul

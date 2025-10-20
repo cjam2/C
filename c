@@ -1,36 +1,26 @@
-@echo off
-setlocal EnableDelayedExpansion
 
-:: ================== CONFIG =====================
-set "PLINK=plink.exe"
-set "USER=myuser"
-set "PASS=mypassword"
 
-:: File containing list of servers (one per line)
-set "SERVERFILE=servers.txt"
+for /f "usebackq tokens=*" %%S in ("%SERVERS_FILE%") do (
+    set "SERVER=%%S"
+    if not "!SERVER!"=="" (
+        echo -------------------------------
+        echo Connecting to: !SERVER!
+        echo Trying with -batch first...
 
-:: Output file
-set "OUTFILE=output.txt"
-
-:: ======= Customize your Linux commands here =====
-:: Separate multiple commands with " && "
-set "CMDS=uname -a && whoami && uptime"
-:: ================================================
-if exist "%OUTFILE%" del "%OUTFILE%"
-
-:: Loop over each server in servers.txt
-for /f "usebackq tokens=* delims=" %%S in ("%SERVERFILE%") do (
-  if not "%%S"=="" (
-    echo ======================================================= >> "%OUTFILE%"
-    echo Running on server: %%S >> "%OUTFILE%"
-    echo ======================================================= >> "%OUTFILE%"
-
-    "%PLINK%" -ssh -pw "%PASS%" -batch -noagent %USER%@%%S "%CMDS%" >> "%OUTFILE%" 2>&1
-
-    echo. >> "%OUTFILE%"
-  )
+        :: Try non-interactive
+        "%PLINK%" -ssh -batch -pw "%PASS%" %USER%!@!SERVER! "%REMOTE_COMMAND%"
+        if !ERRORLEVEL! EQU 0 (
+            echo [SUCCESS] Batch worked fine for !SERVER!
+        ) else (
+            echo [FAILED] Batch mode failed for !SERVER!
+            echo Switching to manual mode so you can accept key or login...
+            "%PLINK%" -ssh -pw "%PASS%" %USER%!@!SERVER! "%REMOTE_COMMAND%"
+        )
+        echo.
+    )
 )
 
-echo Done. Output saved to %OUTFILE%
+echo ========================================
+echo Completed for all servers.
+echo ========================================
 endlocal
-pause

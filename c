@@ -1,167 +1,100 @@
-let
-  // =========================
-  //  A) SOURCE (your CSV URL)
-  // =========================
-  SourceCsvUrl = "<<< EDIT ME: paste your CSV export URL here >>>",
+#!/usr/bin/env bash
+# batch_runner.sh — upload a local .sh to many servers, run it, fetch logs, clean up.
 
-  CsvRaw = Csv.Document(
-            Web.Contents(SourceCsvUrl),
-            [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]
-          ),
-  Promote = Table.PromoteHeaders(CsvRaw, [PromoteAllScalars=true]),
-  Trimmed = Table.TransformColumns(
-              Promote,
-              List.Transform(Table.ColumnNames(Promote), each {_, (x)=> if Value.Is(x, type text) then Text.Trim(x) else x, type any})
-            ),
+set -u
 
-  // ===========================================
-  //  B) CONFIG — date field + fiscal quarters
-  // ===========================================
-  // <<< EDIT ME: choose the date column you want to bucket by >>>
-  // Common choices: "sys_created_on", "start_date", "planned_start_date", "work_start"
-  DateFieldName = "sys_created_on",
+# ======== CONFIG (edit as needed) ========
+USER="${USER:-ubuntu}"          # remote user
+PASS="${PASS:-}"                # remote password (optional; uses sshpass if set)
+PORT="${PORT:-22}"              # SSH port
+SUDO_MODE="${SUDO_MODE:-0}"     # 0=no sudo, 1=run the script with sudo
+STRICT_HOST="${STRICT_HOST:-accept-new}"  # StrictHostKeyChecking: no|accept-new|yes
+LOCAL_SH="${LOCAL_SH:-$(pwd)/my_script.sh}"
+SERVERS_FILE="${SERVERS_FILE:-$(pwd)/servers.txt}"
+OUT_DIR="${OUT_DIR:-$(pwd)/outputs}"
+REMOTE_DIR="${REMOTE_DIR:-/tmp}"
+REMOTE_SH_NAME="${REMOTE_SH_NAME:-runner.sh}"
 
-  // Parse the chosen date column (handles text or already-date)
-  WithDate =
-    let
-      HasColumn = List.Contains(Table.ColumnNames(Trimmed), DateFieldName),
-      Step       = if HasColumn then
-                      Table.TransformColumns(
-                        Trimmed,
-                        {{DateFieldName,
-                          each try DateTime.From(_) otherwise try Date.From(_) otherwise null,
-                          type datetime}}
-                      )
-                   else Trimmed
-    in
-      Step,
+# ======== SSH/ SCP wrappers (support password or key) ========
+ssh_cmd_base=(ssh -p "$PORT" -o StrictHostKeyChecking="$STRICT_HOST" -o LogLevel=ERROR)
+scp_cmd_base=(scp -P "$PORT" -o StrictHostKeyChecking="$STRICT_HOST" -o LogLevel=ERROR)
 
-  // FY25 boundaries
-  FY25_Q1_Start = #datetime(2024,11,1,0,0,0),
-  FY25_Q1_End   = #datetime(2025,1,31,23,59,59),
-  FY25_Q2_Start = #datetime(2025,2,1,0,0,0),
-  FY25_Q2_End   = #datetime(2025,4,30,23,59,59),
-  FY25_Q3_Start = #datetime(2025,5,1,0,0,0),
-  FY25_Q3_End   = #datetime(2025,7,31,23,59,59),
-  FY25_Q4_Start = #datetime(2025,8,1,0,0,0),
-  FY25_Q4_End   = #datetime(2025,10,31,23,59,59),
+if [[ -n "$PASS" ]]; then
+  if ! command -v sshpass >/dev/null 2>&1; then
+    echo "[ERROR] sshpass not found but PASS is set. Install sshpass or unset PASS." >&2
+    exit 1
+  fi
+  ssh_cmd_base=(sshpass -p "$PASS" "${ssh_cmd_base[@]}")
+  scp_cmd_base=(sshpass -p "$PASS" "${scp_cmd_base[@]}")
+fi
 
-  QuarterFromDate = (d as nullable datetime) as nullable text =>
-    if d = null then null
-    else if d >= FY25_Q1_Start and d <= FY25_Q1_End then "Q1"
-    else if d >= FY25_Q2_Start and d <= FY25_Q2_End then "Q2"
-    else if d >= FY25_Q3_Start and d <= FY25_Q3_End then "Q3"
-    else if d >= FY25_Q4_Start and d <= FY25_Q4_End then "Q4"
-    else null,
+# ======== Checks ========
+[[ -f "$LOCAL_SH" ]] || { echo "[ERROR] Local script not found: $LOCAL_SH"; exit 1; }
+[[ -f "$SERVERS_FILE" ]] || { echo "[ERROR] Servers file not found: $SERVERS_FILE"; exit 1; }
+mkdir -p "$OUT_DIR" || { echo "[ERROR] Could not create output dir: $OUT_DIR"; exit 1; }
 
-  AddQuarter = Table.AddColumn(WithDate, "FY25_QTR", each QuarterFromDate(Record.Field(_, DateFieldName)), type text),
-  KeepFY25   = Table.SelectRows(AddQuarter, each [FY25_QTR] <> null),
+# ======== Helpers ========
+run_ssh() { "${ssh_cmd_base[@]}" "$@"; }
+run_scp() { "${scp_cmd_base[@]}" "$@"; }
 
-  // Normalize key columns we’ll filter on
-  ToText = (tbl as table, col as text) as table =>
-              if List.Contains(Table.ColumnNames(tbl), col)
-              then Table.TransformColumns(tbl, {{col, each if _ = null then null else Text.From(_), type text}})
-              else tbl,
+# ======== Main loop ========
+while IFS= read -r SERVER || [[ -n "$SERVER" ]]; do
+  # Skip blanks and comments
+  [[ -z "$SERVER" || "${SERVER:0:1}" == "#" ]] && continue
 
-  Norm1 = ToText(KeepFY25, "u_environment"),
-  Norm2 = ToText(Norm1, "assignment_group"),
-  Norm3 = ToText(Norm2, "number"),   // ticket id column (optional but helps for distinct counts)
+  echo
+  echo "--- Processing $SERVER ---"
 
-  // ==========================================================
-  //  C) CATEGORY MAP — add/extend rows to define your report
-  //      Each row = how to count a line in the final report
-  // ==========================================================
-  // You can duplicate/modify rows below to add more categories.
-  CategoryMap = Table.FromRecords({
-    // Example 1 (your explicit rule):
-    // "ARE Release - PAT COs" = assignment_group exactly "ITS-IDE-EP-ARM-AppDeploy" AND u_environment = "PAT"
-    [Category = "ARE Release - PAT COs",  GroupExact = "ITS-IDE-EP-ARM-AppDeploy", EnvList = {"PAT"}],
+  # 1) Upload script
+  if ! run_scp "$LOCAL_SH" "${USER}@${SERVER}:${REMOTE_DIR}/${REMOTE_SH_NAME}"; then
+    echo "[ERROR] Upload failed for $SERVER"
+    continue
+  fi
 
-    // Example 2:
-    [Category = "ARE Release - PROD COs", GroupExact = "ITS-IDE-EP-ARM-AppDeploy", EnvList = {"PROD"}],
+  # 2) Build remote command: chmod +x; run (optionally sudo); write to timestamped log; echo log path
+  REMOTE_RUN="bash -lc 'TS=\$(date +%Y%m%d_%H%M%S);
+    OUT=\"${REMOTE_DIR}/${SERVER}_\${TS}.log\";
+    chmod +x \"${REMOTE_DIR}/${REMOTE_SH_NAME}\";
+    %RUNNER% >\"\$OUT\" 2>&1;
+    echo \"\$OUT\"'"
 
-    // Example 3 (DR or DRP environments treated together):
-    [Category = "ARE Release - DR/DRP COs", GroupExact = "ITS-IDE-EP-ARM-AppDeploy", EnvList = {"DR","DRP"}]
+  if [[ "$SUDO_MODE" == "1" ]]; then
+    REMOTE_RUN="${REMOTE_RUN//%RUNNER%/sudo \"${REMOTE_DIR}/${REMOTE_SH_NAME}\"}"
+  else
+    REMOTE_RUN="${REMOTE_RUN//%RUNNER%/\"${REMOTE_DIR}/${REMOTE_SH_NAME}\"}"
+  fi
 
-    // 👉 Add more rows here (e.g., Automation, Onboarding, NFT, DBA, etc.)
-    // [Category = "ARE Automation - PAT COs",  GroupExact = "ITS-IDE-EP-ARM-Automation", EnvList = {"PAT"}],
-    // [Category = "DBA - PROD COs",            GroupExact = "ITS-IDE-EP-ARM-DBA",        EnvList = {"PROD"}]
-  }),
+  # 3) Execute and capture printed OUT path
+  if ! REMOTE_OUT_PATH=$(run_ssh "${USER}@${SERVER}" "$REMOTE_RUN"); then
+    echo "[ERROR] Execution failed on $SERVER"
+    # attempt cleanup of uploaded script
+    run_ssh "${USER}@${SERVER}" "rm -f '${REMOTE_DIR}/${REMOTE_SH_NAME}'" >/dev/null 2>&1 || true
+    continue
+  fi
 
-  // ====================================================
-  //  D) FILTER + COUNT per Category x Quarter (FY25)
-  // ====================================================
-  // For each Category row, filter the data then count tickets by quarter.
-  CountForCategory = (cat as text, groupExact as text, envList as list) as table =>
-    let
-      Filtered =
-        Table.SelectRows(
-          Norm3,
-          (r) =>
-            // assignment_group equals (case-insensitive)
-            let g = try Text.From(r[assignment_group]) otherwise null in
-            (g <> null and Text.Upper(g) = Text.Upper(groupExact))
-            and
-            // u_environment is one of EnvList (case-insensitive)
-            let e = try Text.From(r[u_environment]) otherwise null in
-            (e <> null and List.Contains(List.Transform(envList, each Text.Upper(_)), Text.Upper(e)))
-        ),
+  if [[ -z "$REMOTE_OUT_PATH" ]]; then
+    echo "[ERROR] No output path returned from remote on $SERVER"
+    run_ssh "${USER}@${SERVER}" "rm -f '${REMOTE_DIR}/${REMOTE_SH_NAME}'" >/dev/null 2>&1 || true
+    continue
+  fi
 
-      // Prefer distinct count of "number" if present, else row count
-      HasNumber = List.Contains(Table.ColumnNames(Filtered), "number"),
-      BaseTable = if HasNumber then Table.SelectColumns(Filtered, {"number", "FY25_QTR"}) else Table.SelectColumns(Filtered, {"FY25_QTR"}),
+  echo "[INFO] Remote output file: $REMOTE_OUT_PATH"
 
-      DistinctBase = if HasNumber then Table.Distinct(BaseTable) else BaseTable,
+  # 4) Download the output file
+  if ! run_scp "${USER}@${SERVER}:${REMOTE_OUT_PATH}" "$OUT_DIR/"; then
+    echo "[ERROR] Download failed for $SERVER"
+    # still try to clean
+    run_ssh "${USER}@${SERVER}" "rm -f '${REMOTE_DIR}/${REMOTE_SH_NAME}' '${REMOTE_OUT_PATH}'" >/dev/null 2>&1 || true
+    continue
+  fi
 
-      Grouped = Table.Group(DistinctBase, {"FY25_QTR"}, {{"Count", each Table.RowCount(_), Int64.Type}}),
+  # 5) Cleanup on server
+  echo "[STEP] Cleaning up remote files on $SERVER ..."
+  run_ssh "${USER}@${SERVER}" "rm -f '${REMOTE_DIR}/${REMOTE_SH_NAME}' '${REMOTE_OUT_PATH}'" >/dev/null 2>&1 || \
+    echo "[WARN] Cleanup may have failed on $SERVER"
 
-      // Ensure all quarters exist (fill missing with 0)
-      AllQtrs = #table({"FY25_QTR"}, {{"Q1"},{"Q2"},{"Q3"},{"Q4"}}),
-      JoinQ   = Table.Join(AllQtrs, "FY25_QTR", Grouped, "FY25_QTR", JoinKind.LeftOuter),
-      Filled0 = Table.ReplaceValue(JoinQ, null, 0, Replacer.ReplaceValue, {"Count"}),
+  echo "[DONE] Finished $SERVER"
+done < "$SERVERS_FILE"
 
-      Pivoted = Table.Pivot(Filled0, List.Distinct(Filled0[FY25_QTR]), "FY25_QTR", "Count")
-    in
-      Pivoted,
-
-  // Build a single table by iterating the category map
-  WithCounts =
-    Table.AddColumn(
-      CategoryMap, "Counts",
-      each CountForCategory([Category], [GroupExact], [EnvList])
-    ),
-
-  Expanded =
-    let
-      // expand Q1..Q4 (which may or may not exist yet)
-      Temp = Table.ExpandTableColumn(WithCounts, "Counts", {"Q1","Q2","Q3","Q4"}, {"Q1","Q2","Q3","Q4"}),
-      // Replace nulls with 0s
-      Filled = Table.ReplaceValue(Temp, null, 0, Replacer.ReplaceValue, {"Q1","Q2","Q3","Q4"})
-    in
-      Filled,
-
-  // Row total
-  WithTotal = Table.AddColumn(Expanded, "FY25 Total", each [Q1]+[Q2]+[Q3]+[Q4], Int64.Type),
-
-  // Output columns (hide config columns)
-  Final = Table.SelectColumns(WithTotal, {"Category","Q1","Q2","Q3","Q4","FY25 Total"})
-in
-  Final
-
-
-
-
-
-
-
-
----------
-
-
-
-
-[Category = "ARE Automation - PAT COs", GroupExact = "ITS-IDE-EP-ARM-Automation", EnvList = {"PAT"}],
-[Category = "ARE Automation - PROD COs", GroupExact = "ITS-IDE-EP-ARM-Automation", EnvList = {"PROD"}],
-[Category = "ARE Automation / Onboarding - PAT COs", GroupExact = "ITS-IDE-EP-ARM-Onboarding", EnvList = {"PAT"}],
-[Category = "NFT - PAT COs", GroupExact = "ITS-IDE-EP-ARM-NFT", EnvList = {"PAT"}],
-[Category = "DBA - DR/DRP COs", GroupExact = "ITS-IDE-EP-ARM-DBA", EnvList = {"DR","DRP"}],
+echo
+echo "All done. Logs saved in: $OUT_DIR"

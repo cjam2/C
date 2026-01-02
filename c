@@ -1,6 +1,6 @@
 let
-    BaseUrl = "https://YOUR_JIRA_URL/rest/api/3/search",
-    JQL = "project = ABC AND status != Done ORDER BY updated DESC",
+    BaseUrl = "https://track.td.com/rest/api/2/search",
+    JQL = "resolution in (Unresolved, Done, Fixed, Duplicate, Cancelled, Completed, Complete) AND assignee in (TA8537, TA0037, TA0069)",
 
     Source =
         Json.Document(
@@ -15,6 +15,26 @@ let
                     ]
                 ]
             )
-        )
+        ),
+
+    Issues = Source[issues],
+    IssuesTable = Table.FromList(Issues, Splitter.SplitByNothing(), {"Issue"}, null, ExtraValues.Error),
+
+    ExpandTop = Table.ExpandRecordColumn(IssuesTable, "Issue", {"id","key","self","fields"}, {"id","key","self","fields"}),
+
+    ExpandFields = Table.ExpandRecordColumn(
+        ExpandTop,
+        "fields",
+        {"summary","status","assignee","priority","issuetype","created","updated"},
+        {"summary","status","assignee","priority","issuetype","created","updated"}
+    ),
+
+    ExpandStatus = Table.ExpandRecordColumn(ExpandFields, "status", {"name"}, {"status"}),
+
+    ExpandAssignee = Table.ExpandRecordColumn(ExpandStatus, "assignee", {"displayName","name","emailAddress"}, {"assignee","assigneeUser","assigneeEmail"}),
+
+    ExpandPriority = Table.ExpandRecordColumn(ExpandAssignee, "priority", {"name"}, {"priority"}),
+
+    ExpandType = Table.ExpandRecordColumn(ExpandPriority, "issuetype", {"name"}, {"issueType"})
 in
-    Source
+    ExpandType

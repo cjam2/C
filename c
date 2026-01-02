@@ -11,7 +11,7 @@ let
                         jql = JQL,
                         maxResults = "100",
                         startAt = "0",
-                        fields = "summary,status,assignee,priority,issuetype,created,updated"
+                        fields = "summary,status,assignee,priority,issuetype,created,updated,customfield_24100,customfield_24101"
                     ]
                 ]
             )
@@ -25,8 +25,8 @@ let
     ExpandFields = Table.ExpandRecordColumn(
         ExpandTop,
         "fields",
-        {"summary","status","assignee","priority","issuetype","created","updated"},
-        {"summary","status","assignee","priority","issuetype","created","updated"}
+        {"summary","status","assignee","priority","issuetype","created","updated","customfield_24100","customfield_24101"},
+        {"summary","status","assignee","priority","issuetype","created","updated","targetStartDate","targetEndDate"}
     ),
 
     ExpandStatus = Table.ExpandRecordColumn(ExpandFields, "status", {"name"}, {"status"}),

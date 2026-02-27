@@ -1,98 +1,210 @@
-    pages = []
-    start = 0
-    total_size = None
+import os
+import json
+import streamlit as st
 
-    seen_batch_first_ids = set()
-    max_batches = 500  # safety stop (adjust if needed)
+from sync_confluence import sync_confluence
+from chunking import html_to_text, chunk_words
+from indexer import build_bm25, search_bm25
 
-    batch_num = 0
-    while True:
-        batch_num += 1
-        if batch_num > max_batches:
-            raise RuntimeError("Pagination safety stop: too many batches. Likely 'start' is being ignored.")
+# -----------------------------
+# Robust config loading
+# -----------------------------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 
-        url = f"{base_url}/rest/api/content/search"
-        params = {
-            "cql": effective_cql,
-            "start": start,
-            "limit": limit,
-            "expand": "body.storage,version,space,_links"
-        }
+if not os.path.exists(CONFIG_PATH):
+    raise FileNotFoundError(
+        f"config.json not found at: {CONFIG_PATH}\n"
+        f"Make sure config.json is in the same folder as app.py"
+    )
 
-        r = requests.get(
-            url,
-            params=params,
-            auth=auth,
-            headers={"Accept": "application/json"},
-            timeout=60,
-            verify=False  # local dev only
-        )
+with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+    cfg = json.load(f)
 
-        if r.status_code == 400:
-            raise RuntimeError(f"400 from Confluence. CQL was:\n{effective_cql}\n\nResponse:\n{r.text[:800]}")
+# -----------------------------
+# Directories / settings
+# -----------------------------
+DATA_DIR = cfg.get("data_dir", "./data")
+if not os.path.isabs(DATA_DIR):
+    DATA_DIR = os.path.join(BASE_DIR, DATA_DIR)
+os.makedirs(DATA_DIR, exist_ok=True)
 
-        r.raise_for_status()
-        payload = r.json()
+CHUNKS_PATH = os.path.join(DATA_DIR, "chunks_meta.jsonl")
 
-        # Confluence usually includes totalSize/size
-        if total_size is None:
-            total_size = payload.get("totalSize")
+CHUNK_SIZE = int(cfg.get("chunk_words", 250))
+OVERLAP = int(cfg.get("chunk_overlap", 50))
+TOP_K = int(cfg.get("top_k", 8))
 
-        results = payload.get("results", [])
-        size = payload.get("size", len(results))
+# -----------------------------
+# Streamlit config + session state
+# -----------------------------
+st.set_page_config(page_title="Confluence Doc Search (Local)", layout="wide")
+st.title("Confluence Doc Search (Phase 1 — Local, No LLM)")
+st.caption("Search Confluence docs locally and jump to the exact section. No generation, no hallucinations.")
 
-        print(f"[SYNC] batch={batch_num} start={start} size={size} totalSize={total_size}")
+if "chunks_meta" not in st.session_state:
+    st.session_state.chunks_meta = None
 
-        if not results:
-            break
+if "bm25" not in st.session_state:
+    st.session_state.bm25 = None
 
-        # Detect repeating batches (start ignored / proxy caching)
-        first_id = results[0].get("id")
-        if first_id in seen_batch_first_ids:
-            raise RuntimeError(
-                "Pagination loop detected: received the same first page id again. "
-                "This suggests Confluence is ignoring 'start' or returning cached results.\n"
-                f"Repeated first_id={first_id}\n"
-                f"Effective CQL={effective_cql}"
-            )
-        seen_batch_first_ids.add(first_id)
+if "syncing" not in st.session_state:
+    st.session_state.syncing = False
 
-        for p in results:
-            pid = p["id"]
-            title = p.get("title", "")
-            space = p.get("space", {}).get("key", "")
-            when = p.get("version", {}).get("when", "")
-            html = p.get("body", {}).get("storage", {}).get("value", "")
+if "sync_msg" not in st.session_state:
+    st.session_state.sync_msg = ""
 
-            links = p.get("_links", {})
-            webui = links.get("webui", "")
-            page_url = f"{base_url}{webui}" if webui else base_url
+# -----------------------------
+# Helpers: save/load cached chunks
+# -----------------------------
+def save_chunks(chunks_meta):
+    with open(CHUNKS_PATH, "w", encoding="utf-8") as f:
+        for item in chunks_meta:
+            f.write(json.dumps(item, ensure_ascii=False) + "\n")
 
-            rec = {
-                "id": pid,
-                "title": title,
-                "space": space,
-                "updated": when,
-                "url": page_url,
-                "html": html
-            }
-            pages.append(rec)
+def load_chunks():
+    if not os.path.exists(CHUNKS_PATH):
+        return None
+    chunks = []
+    with open(CHUNKS_PATH, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            chunks.append(json.loads(line))
+    return chunks
 
-            with open(os.path.join(raw_dir, f"{pid}.json"), "w", encoding="utf-8") as f:
-                json.dump(rec, f, ensure_ascii=False)
+# -----------------------------
+# Auto-load cached index on startup
+# -----------------------------
+if st.session_state.chunks_meta is None:
+    cached = load_chunks()
+    if cached:
+        st.session_state.chunks_meta = cached
+        st.session_state.bm25 = build_bm25(cached)
 
-        # Advance pagination
-        prev_start = start
-        start += len(results)
+# -----------------------------
+# UI Layout
+# -----------------------------
+col1, col2 = st.columns([1, 2])
 
-        # If start didn't change, bail (should never happen, but safety)
-        if start == prev_start:
-            raise RuntimeError("Pagination did not advance (start unchanged).")
+with col1:
+    st.subheader("Sync / Index")
 
-        # Robust stop if totalSize exists
-        if total_size is not None and start >= total_size:
-            break
+    st.write("Pulls Confluence pages using your CQL and updates the local index.")
+    st.code(cfg.get("cql", ""), language="sql")
 
-        # Fallback stop: if fewer than limit returned
-        if len(results) < limit:
-            break
+    # Credentials in UI (no terminal prompts)
+    conf_user = st.text_input("Confluence user", key="conf_user")
+    conf_pass = st.text_input("Confluence password", type="password", key="conf_pass")
+
+    if st.button("Sync Now"):
+        st.session_state.syncing = True
+        st.session_state.sync_msg = ""
+        st.rerun()
+
+    # Run sync job if flagged
+    if st.session_state.syncing:
+        with st.spinner("Syncing Confluence and building index..."):
+            progress = st.progress(0)
+            status = st.empty()
+
+            if not conf_user or not conf_pass:
+                progress.progress(100)
+                st.session_state.sync_msg = "❌ Enter Confluence username and password."
+                st.session_state.syncing = False
+                st.rerun()
+
+            pages = sync_confluence(cfg, conf_user, conf_pass)
+
+            # If no pages returned (common in incremental sync), exit cleanly
+            if not pages:
+                progress.progress(100)
+                st.session_state.sync_msg = "✅ Sync completed: 0 pages returned for this CQL/incremental window. Index unchanged."
+                st.session_state.syncing = False
+                st.rerun()
+
+            total_pages = len(pages)
+            chunks_meta_new = []
+
+            for i, p in enumerate(pages, 1):
+                status.write(f"Processing page {i}/{total_pages}: {p.get('title','')}")
+                text = html_to_text(p.get("html", ""))
+                chunks = chunk_words(text, chunk_size=CHUNK_SIZE, overlap=OVERLAP)
+
+                for c in chunks:
+                    chunks_meta_new.append({
+                        "page_id": p.get("id", ""),
+                        "title": p.get("title", ""),
+                        "space": p.get("space", ""),
+                        "updated": p.get("updated", ""),
+                        "url": p.get("url", ""),
+                        "chunk": c
+                    })
+
+                progress.progress(int(i / total_pages * 100))
+
+            # Merge incremental updates into cache
+            existing = load_chunks() or []
+            changed_ids = {x["page_id"] for x in chunks_meta_new if x.get("page_id")}
+
+            # Remove old chunks for changed pages
+            existing = [x for x in existing if x.get("page_id") not in changed_ids]
+
+            combined = existing + chunks_meta_new
+
+            bm25 = build_bm25(combined)
+            st.session_state.chunks_meta = combined
+            st.session_state.bm25 = bm25
+            save_chunks(combined)
+
+            progress.progress(100)
+            st.session_state.sync_msg = f"✅ Sync done. Updated {len(changed_ids)} pages. Total chunks: {len(combined)}."
+            st.session_state.syncing = False
+            st.rerun()
+
+    if st.session_state.sync_msg:
+        st.info(st.session_state.sync_msg)
+
+    st.markdown("### Index status")
+    if st.session_state.bm25 is None:
+        st.warning("No index loaded. Click **Sync Now**.")
+    else:
+        st.success("Index is loaded and ready to search.")
+        st.write(f"Chunks loaded: **{len(st.session_state.chunks_meta) if st.session_state.chunks_meta else 0}**")
+
+    if st.button("Clear Local Cache"):
+        if os.path.exists(CHUNKS_PATH):
+            os.remove(CHUNKS_PATH)
+        st.session_state.chunks_meta = None
+        st.session_state.bm25 = None
+        st.session_state.sync_msg = "✅ Cache cleared. Please Sync again."
+        st.rerun()
+
+with col2:
+    st.subheader("Search")
+    q = st.text_input("Ask a question / type keywords:")
+
+    if st.button("Search") and q:
+        if st.session_state.bm25 is None or st.session_state.chunks_meta is None:
+            st.error("No index loaded. Click **Sync Now** first.")
+        else:
+            results = search_bm25(q, st.session_state.bm25, st.session_state.chunks_meta, top_k=TOP_K)
+
+            if not results:
+                st.warning("No strong matches found. Try different keywords or widen your CQL scope.")
+            else:
+                st.write(f"Top results: **{len(results)}**")
+                for i, r in enumerate(results, 1):
+                    st.markdown(f"### {i}. {r.get('title','')}")
+                    st.write(
+                        f"**Space:** {r.get('space','')}  |  "
+                        f"**Updated:** {r.get('updated','')}  |  "
+                        f"**Score:** {r.get('score',0):.2f}"
+                    )
+                    chunk = r.get("chunk", "")
+                    st.write(chunk[:900] + ("..." if len(chunk) > 900 else ""))
+                    url = r.get("url", "")
+                    if url:
+                        st.markdown(f"[Open in Confluence]({url})")
+                    st.divider()

@@ -1,7 +1,6 @@
 import os, json, time, datetime
 import requests
 import urllib3
-import getpass
 from requests.auth import HTTPBasicAuth
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -16,7 +15,7 @@ def _load_last_sync(data_dir: str):
     try:
         with open(p, "r", encoding="utf-8") as f:
             meta = json.load(f)
-        return meta.get("last_sync_cql_time")  # string
+        return meta.get("last_sync_cql_time")
     except Exception:
         return None
 
@@ -30,8 +29,6 @@ def _save_last_sync(data_dir: str, last_sync_str: str, page_count: int):
         json.dump(meta, f, indent=2)
 
 def _format_confluence_cql_time(dt: datetime.datetime) -> str:
-    # Confluence CQL supports date/time strings; this format is widely accepted.
-    # Example: 2026-02-27 21:30
     return dt.strftime("%Y-%m-%d %H:%M")
 
 def _build_effective_cql(cfg, data_dir: str) -> str:
@@ -43,10 +40,9 @@ def _build_effective_cql(cfg, data_dir: str) -> str:
     if not last_sync:
         return base_cql
 
-    # Wrap base query to preserve precedence, then append lastmodified filter
     return f"({base_cql}) AND lastmodified > \"{last_sync}\""
 
-def sync_confluence(cfg):
+def sync_confluence(cfg, user: str, pw: str):
     base = cfg["confluence_base_url"].rstrip("/")
     limit = int(cfg.get("limit", 50))
 
@@ -56,10 +52,6 @@ def sync_confluence(cfg):
     os.makedirs(raw_dir, exist_ok=True)
 
     effective_cql = _build_effective_cql(cfg, data_dir)
-
-    # Prompt for credentials (masked)
-    user = input("Confluence user: ")
-    pw = getpass.getpass("Confluence password: ")
     auth = HTTPBasicAuth(user, pw)
 
     pages = []
@@ -82,7 +74,6 @@ def sync_confluence(cfg):
             timeout=60,
             verify=False  # local dev only
         )
-
         r.raise_for_status()
         payload = r.json()
         results = payload.get("results", [])
@@ -109,7 +100,6 @@ def sync_confluence(cfg):
                 "url": url_page,
                 "html": html
             }
-
             pages.append(rec)
 
             with open(os.path.join(raw_dir, f"{pid}.json"), "w", encoding="utf-8") as f:
@@ -119,15 +109,7 @@ def sync_confluence(cfg):
         if len(results) < limit:
             break
 
-    # Save last sync time as "now" for next incremental run
     now_str = _format_confluence_cql_time(datetime.datetime.now())
     _save_last_sync(data_dir, now_str, len(pages))
 
     return pages
-
-if __name__ == "__main__":
-    with open("config.json", "r", encoding="utf-8") as f:
-        cfg = json.load(f)
-
-    pages = sync_confluence(cfg)
-    print(f"Synced {len(pages)} pages.")

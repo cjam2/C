@@ -1,214 +1,135 @@
-import os
-import json
-import time
-import datetime
-import requests
-import urllib3
-from requests.auth import HTTPBasicAuth
+from rank_bm25 import BM25Okapi
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+def tokenize(text: str):
+    return [t for t in text.lower().split() if t.strip()]
 
-
-# -----------------------------
-# sync_meta helpers
-# -----------------------------
-def _sync_meta_path(data_dir: str) -> str:
-    return os.path.join(data_dir, "sync_meta.json")
-
-
-def _load_meta(data_dir: str) -> dict:
-    p = _sync_meta_path(data_dir)
-    if not os.path.exists(p):
-        return {}
-    try:
-        with open(p, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-
-def _save_meta(data_dir: str, meta: dict):
-    with open(_sync_meta_path(data_dir), "w", encoding="utf-8") as f:
-        json.dump(meta, f, indent=2)
-
-
-# -----------------------------
-# Date parsing / formatting
-# -----------------------------
-def _parse_confluence_when(when_str: str):
+def build_bm25(chunks_meta):
     """
-    Confluence version.when commonly looks like:
-      2026-02-27T21:30:12.123-0500
+    Build BM25 using pre-tokenized chunks if available.
     """
-    if not when_str:
-        return None
-    for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
+    if not chunks_meta:
+        return BM25Okapi([[]])
+
+    # Prefer precomputed tokens if present
+    if "tokens" in chunks_meta[0] and isinstance(chunks_meta[0]["tokens"], list):
+        corpus_tokens = [x.get("tokens", []) for x in chunks_meta]
+    else:
+        corpus_tokens = [tokenize(x.get("chunk", "")) for x in chunks_meta]
+
+    return BM25Okapi(corpus_tokens)
+
+def search_bm25(query: str, bm25, chunks_meta, top_k=8):
+    q_tokens = tokenize(query)
+    scores = bm25.get_scores(q_tokens)
+
+    ranked = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)[:top_k]
+    results = []
+    for idx, score in ranked:
+        if score <= 0:
+            continue
+        item = dict(chunks_meta[idx])
+        item["score"] = float(score)
+        results.append(item)
+    return results
+
+
+
+
+
+
+
+
+
+
+
+
+chunks_meta_new.append({
+    "page_id": ...,
+    "title": ...,
+    "space": ...,
+    "updated": ...,
+    "url": ...,
+    "chunk": c
+})
+
+
+
+
+
+from indexer import tokenize  # add to top imports OR import inside block
+
+chunks_meta_new.append({
+    "page_id": p.get("id", ""),
+    "title": p.get("title", ""),
+    "space": p.get("space", ""),
+    "updated": p.get("updated", ""),
+    "url": p.get("url", ""),
+    "chunk": c,
+    "tokens": tokenize(c)   # ✅ pre-tokenize once
+})
+
+
+
+
+def process_page_to_chunks(p, chunk_size, overlap):
+    """
+    Convert one Confluence page dict -> list of chunk_meta dicts (with tokens).
+    """
+    text = html_to_text(p.get("html", ""))
+    chunks = chunk_words(text, chunk_size=chunk_size, overlap=overlap)
+
+    out = []
+    for c in chunks:
+        out.append({
+            "page_id": p.get("id", ""),
+            "title": p.get("title", ""),
+            "space": p.get("space", ""),
+            "updated": p.get("updated", ""),
+            "url": p.get("url", ""),
+            "chunk": c,
+            "tokens": tokenize(c)
+        })
+    return out
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+total_pages = len(pages)
+chunks_meta_new = []
+
+max_workers = min(16, (os.cpu_count() or 4))  # safe default
+status.write(f"Parallel processing with {max_workers} workers...")
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+    futures = {
+        ex.submit(process_page_to_chunks, p, CHUNK_SIZE, OVERLAP): p
+        for p in pages
+    }
+
+    done_count = 0
+    for fut in concurrent.futures.as_completed(futures):
+        p = futures[fut]
         try:
-            return datetime.datetime.strptime(when_str, fmt)
-        except Exception:
-            pass
-    return None
+            page_chunks = fut.result()
+            chunks_meta_new.extend(page_chunks)
+        except Exception as e:
+            # Keep going even if one page fails
+            status.write(f"⚠️ Failed page: {p.get('title','(no title)')} — {e}")
 
-
-def _format_cql_minute(dt: datetime.datetime) -> str:
-    """
-    Confluence CQL reliably accepts:
-      "yyyy-MM-dd HH:mm"
-    (seconds are NOT accepted in many DC environments)
-    """
-    local_dt = dt.astimezone().replace(tzinfo=None)
-    return local_dt.strftime("%Y-%m-%d %H:%M")
-
-
-# -----------------------------
-# CQL builder (Incremental, DC-safe)
-# -----------------------------
-def _build_effective_cql(cfg: dict, data_dir: str) -> str:
-    base = cfg["cql"].strip()
-    if not cfg.get("incremental_sync", False):
-        return base
-
-    meta = _load_meta(data_dir)
-    last_time = meta.get("last_sync_cql_time")  # "YYYY-MM-DD HH:mm"
-    if not last_time:
-        return base
-
-    # DC-safe incremental filter (no id > tie-breaker; not supported)
-    return f"({base}) AND lastmodified > \"{last_time}\""
-
-
-# -----------------------------
-# Main sync
-# -----------------------------
-def sync_confluence(cfg: dict, user: str, pw: str):
-    base_url = cfg["confluence_base_url"].rstrip("/")
-    limit = int(cfg.get("limit", 50))
-
-    # Make data_dir absolute and stable (avoid “different ./data” issues)
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    data_dir = cfg.get("data_dir", "./data")
-    if not os.path.isabs(data_dir):
-        data_dir = os.path.join(base_dir, data_dir)
-
-    os.makedirs(data_dir, exist_ok=True)
-    raw_dir = os.path.join(data_dir, "raw_pages")
-    os.makedirs(raw_dir, exist_ok=True)
-
-    effective_cql = _build_effective_cql(cfg, data_dir)
-    print("Effective CQL:", effective_cql)
-    print("Sync meta path:", _sync_meta_path(data_dir))
-
-    auth = HTTPBasicAuth(user, pw)
-
-    pages = []
-    start = 0
-    total_size = None
-
-    # Cursor tracking (max modified time)
-    latest_when_dt = None
-
-    # Safety: detect broken pagination
-    batch_num = 0
-    max_batches = 1000
-    seen_batch_first_ids = set()
-
-    while True:
-        batch_num += 1
-        if batch_num > max_batches:
-            raise RuntimeError("Pagination safety stop: too many batches. Likely 'start' is being ignored.")
-
-        url = f"{base_url}/rest/api/content/search"
-        params = {
-            "cql": effective_cql,
-            "start": start,
-            "limit": limit,
-            "expand": "body.storage,version,space,_links"
-        }
-
-        r = requests.get(
-            url,
-            params=params,
-            auth=auth,
-            headers={"Accept": "application/json"},
-            timeout=60,
-            verify=False  # local dev only
-        )
-
-        if r.status_code == 400:
-            raise RuntimeError(f"400 from Confluence. CQL was:\n{effective_cql}\n\nResponse:\n{r.text[:800]}")
-
-        r.raise_for_status()
-        payload = r.json()
-
-        if total_size is None:
-            total_size = payload.get("totalSize")
-
-        results = payload.get("results", [])
-        size = payload.get("size", len(results))
-        print(f"[SYNC] batch={batch_num} start={start} size={size} totalSize={total_size}")
-
-        if not results:
-            break
-
-        # Detect repeating batches (start ignored / proxy caching)
-        first_id = results[0].get("id")
-        if first_id in seen_batch_first_ids:
-            raise RuntimeError(
-                "Pagination loop detected: received the same first page id again. "
-                "This suggests Confluence is ignoring 'start' or returning cached results.\n"
-                f"Repeated first_id={first_id}\n"
-                f"Effective CQL={effective_cql}"
-            )
-        seen_batch_first_ids.add(first_id)
-
-        for p in results:
-            pid = p["id"]
-            title = p.get("title", "")
-            space = p.get("space", {}).get("key", "")
-            when = p.get("version", {}).get("when", "")
-            html = p.get("body", {}).get("storage", {}).get("value", "")
-
-            dt = _parse_confluence_when(when)
-            if dt and (latest_when_dt is None or dt > latest_when_dt):
-                latest_when_dt = dt
-
-            links = p.get("_links", {})
-            webui = links.get("webui", "")
-            page_url = f"{base_url}{webui}" if webui else base_url
-
-            rec = {
-                "id": pid,
-                "title": title,
-                "space": space,
-                "updated": when,
-                "url": page_url,
-                "html": html
-            }
-            pages.append(rec)
-
-            with open(os.path.join(raw_dir, f"{pid}.json"), "w", encoding="utf-8") as f:
-                json.dump(rec, f, ensure_ascii=False)
-
-        # Advance pagination
-        start += len(results)
-
-        # Robust stop conditions
-        if total_size is not None and start >= total_size:
-            break
-        if len(results) < limit:
-            break
-
-    # -----------------------------
-    # Save sync_meta
-    # -----------------------------
-    meta = _load_meta(data_dir)
-    meta["synced_at_epoch"] = time.time()
-    meta["page_count_last_run"] = len(pages)
-
-    # ✅ DC-safe A.5: advance cursor by +1 minute to avoid same-minute collisions
-    if cfg.get("incremental_sync", False) and latest_when_dt is not None:
-        next_cursor = latest_when_dt + datetime.timedelta(minutes=1)
-        meta["last_sync_cql_time"] = _format_cql_minute(next_cursor)
-
-    _save_meta(data_dir, meta)
-    return pages
+        done_count += 1
+        progress.progress(int(done_count / total_pages * 100))
+        status.write(f"Processed {done_count}/{total_pages} pages...")

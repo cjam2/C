@@ -1,0 +1,232 @@
+streamlit
+requests
+beautifulsoup4
+lxml
+tqdm
+rank-bm25
+nltk
+
+
+config.json
+{
+  "confluence_base_url": "https://confluence.yourcompany.com",
+  "username": "YOUR_USERNAME",
+  "pat": "YOUR_PAT",
+  "cql": "space = ABC AND type = page AND lastmodified > now(\"-90d\")",
+  "limit": 50,
+  "data_dir": "./data",
+  "chunk_words": 250,
+  "chunk_overlap": 50,
+  "top_k": 8
+}
+
+
+
+sync_confluence.py
+import os, json, time
+import requests
+from tqdm import tqdm
+
+def _search(base_url, auth, cql, start=0, limit=50):
+    url = f"{base_url}/rest/api/content/search"
+    params = {
+        "cql": cql,
+        "start": start,
+        "limit": limit,
+        "expand": "body.storage,version,space,_links"
+    }
+    r = requests.get(url, params=params, auth=auth, timeout=60)
+    r.raise_for_status()
+    return r.json()
+
+def sync_confluence(cfg):
+    base = cfg["confluence_base_url"].rstrip("/")
+    auth = (cfg["username"], cfg["pat"])
+    cql = cfg["cql"]
+    limit = int(cfg.get("limit", 50))
+
+    data_dir = cfg["data_dir"]
+    raw_dir = os.path.join(data_dir, "raw_pages")
+    os.makedirs(raw_dir, exist_ok=True)
+
+    pages = []
+    start = 0
+    while True:
+        payload = _search(base, auth, cql, start=start, limit=limit)
+        results = payload.get("results", [])
+        if not results:
+            break
+
+        for p in results:
+            pid = p["id"]
+            title = p.get("title", "")
+            space = p.get("space", {}).get("key", "")
+            when = p.get("version", {}).get("when", "")
+            html = p.get("body", {}).get("storage", {}).get("value", "")
+
+            links = p.get("_links", {})
+            webui = links.get("webui", "")
+            url = f"{base}{webui}" if webui else base
+
+            rec = {
+                "id": pid,
+                "title": title,
+                "space": space,
+                "updated": when,
+                "url": url,
+                "html": html
+            }
+            pages.append(rec)
+
+            with open(os.path.join(raw_dir, f"{pid}.json"), "w", encoding="utf-8") as f:
+                json.dump(rec, f, ensure_ascii=False)
+
+        start += len(results)
+        if len(results) < limit:
+            break
+
+    meta = {"synced_at": time.time(), "page_count": len(pages)}
+    with open(os.path.join(data_dir, "sync_meta.json"), "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
+
+    return pages
+
+if __name__ == "__main__":
+    with open("config.json", "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+    pages = sync_confluence(cfg)
+    print(f"Synced {len(pages)} pages.")
+
+
+
+
+
+chunking.py
+
+
+from bs4 import BeautifulSoup
+
+def html_to_text(html: str) -> str:
+    soup = BeautifulSoup(html, "lxml")
+    for tag in soup(["script", "style"]):
+        tag.decompose()
+    text = soup.get_text(separator="\n")
+    lines = [ln.strip() for ln in text.splitlines()]
+    lines = [ln for ln in lines if ln]
+    return "\n".join(lines)
+
+def chunk_words(text: str, chunk_size=250, overlap=50):
+    words = text.split()
+    chunks = []
+    i = 0
+    while i < len(words):
+        chunk = words[i:i+chunk_size]
+        chunks.append(" ".join(chunk))
+        i += max(1, chunk_size - overlap)
+    return chunks
+
+
+
+
+indexer.py
+import os, json
+import nltk
+from rank_bm25 import BM25Okapi
+
+nltk.download("punkt", quiet=True)
+
+def tokenize(text: str):
+    # simple tokenizer; you can improve later
+    return [t.lower() for t in nltk.word_tokenize(text) if t.isalnum()]
+
+def build_bm25(chunks_meta):
+    corpus_tokens = [tokenize(x["chunk"]) for x in chunks_meta]
+    bm25 = BM25Okapi(corpus_tokens)
+    return bm25, corpus_tokens
+
+def search_bm25(query: str, bm25, chunks_meta, top_k=8):
+    q_tokens = tokenize(query)
+    scores = bm25.get_scores(q_tokens)
+    ranked = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)[:top_k]
+    results = []
+    for idx, score in ranked:
+        if score <= 0:
+            continue
+        item = dict(chunks_meta[idx])
+        item["score"] = float(score)
+        results.append(item)
+    return results
+
+
+
+
+app.py
+import os, json
+import streamlit as st
+from sync_confluence import sync_confluence
+from chunking import html_to_text, chunk_words
+from indexer import build_bm25, search_bm25
+
+st.set_page_config(page_title="Confluence Doc Search (Local)", layout="wide")
+st.title("Confluence Doc Search (Phase 1 — Local, No LLM)")
+st.caption("Search Confluence docs locally and jump to the exact section. No generation, no hallucinations.")
+
+with open("config.json", "r", encoding="utf-8") as f:
+    cfg = json.load(f)
+
+DATA_DIR = cfg["data_dir"]
+CHUNK_SIZE = int(cfg.get("chunk_words", 250))
+OVERLAP = int(cfg.get("chunk_overlap", 50))
+TOP_K = int(cfg.get("top_k", 8))
+
+if "chunks_meta" not in st.session_state:
+    st.session_state.chunks_meta = None
+    st.session_state.bm25 = None
+
+col1, col2 = st.columns([1, 2])
+
+with col1:
+    st.subheader("Sync")
+    st.write("Pulls Confluence pages using your CQL and rebuilds the local index.")
+    if st.button("Sync Now"):
+        pages = sync_confluence(cfg)
+
+        chunks_meta = []
+        for p in pages:
+            text = html_to_text(p["html"])
+            chunks = chunk_words(text, chunk_size=CHUNK_SIZE, overlap=OVERLAP)
+            for c in chunks:
+                chunks_meta.append({
+                    "title": p["title"],
+                    "space": p["space"],
+                    "updated": p["updated"],
+                    "url": p["url"],
+                    "chunk": c
+                })
+
+        bm25, _ = build_bm25(chunks_meta)
+        st.session_state.chunks_meta = chunks_meta
+        st.session_state.bm25 = bm25
+        st.success(f"Indexed {len(chunks_meta)} chunks from {len(pages)} pages.")
+
+with col2:
+    st.subheader("Search")
+    q = st.text_input("Ask a question / type keywords:")
+    if st.button("Search") and q:
+        if not st.session_state.bm25:
+            st.error("No index yet. Click Sync Now first.")
+        else:
+            results = search_bm25(q, st.session_state.bm25, st.session_state.chunks_meta, top_k=TOP_K)
+
+            if not results:
+                st.warning("No strong matches found. Try different keywords or widen your CQL scope.")
+            else:
+                for i, r in enumerate(results, 1):
+                    st.markdown(f"### {i}. {r['title']}")
+                    st.write(f"**Space:** {r['space']}  |  **Updated:** {r['updated']}  |  **Score:** {r['score']:.2f}")
+                    st.write(r["chunk"][:800] + ("..." if len(r["chunk"]) > 800 else ""))
+                    st.markdown(f"[Open in Confluence]({r['url']})")
+                    st.divider()
+
+
+

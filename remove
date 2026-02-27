@@ -1,210 +1,193 @@
-import os
-import json
-import streamlit as st
+import os, json, time, datetime
+import requests
+import urllib3
+from requests.auth import HTTPBasicAuth
 
-from sync_confluence import sync_confluence
-from chunking import html_to_text, chunk_words
-from indexer import build_bm25, search_bm25
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# -----------------------------
-# Robust config loading
-# -----------------------------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+def _sync_meta_path(data_dir: str) -> str:
+    return os.path.join(data_dir, "sync_meta.json")
 
-if not os.path.exists(CONFIG_PATH):
-    raise FileNotFoundError(
-        f"config.json not found at: {CONFIG_PATH}\n"
-        f"Make sure config.json is in the same folder as app.py"
+def _load_meta(data_dir: str) -> dict:
+    p = _sync_meta_path(data_dir)
+    if not os.path.exists(p):
+        return {}
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_meta(data_dir: str, meta: dict):
+    with open(_sync_meta_path(data_dir), "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
+
+def _parse_confluence_when(when_str: str):
+    # Example: "2026-02-27T21:30:12.123-0500"
+    if not when_str:
+        return None
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
+        try:
+            return datetime.datetime.strptime(when_str, fmt)
+        except Exception:
+            pass
+    return None
+
+def _format_cql_minute(dt: datetime.datetime) -> str:
+    # Confluence CQL accepts yyyy-MM-dd HH:mm (no seconds)
+    local_dt = dt.astimezone().replace(tzinfo=None)
+    return local_dt.strftime("%Y-%m-%d %H:%M")
+
+def _build_effective_cql(cfg: dict, data_dir: str) -> str:
+    base = cfg["cql"].strip()
+    if not cfg.get("incremental_sync", False):
+        return base
+
+    meta = _load_meta(data_dir)
+    last_time = meta.get("last_sync_cql_time")      # "YYYY-MM-DD HH:MM"
+    last_id = meta.get("last_sync_last_id")         # int (page id)
+    if not last_time or last_id is None:
+        return base
+
+    # Tie-breaker cursor: lastmodified > time OR (lastmodified = time AND id > last_id)
+    return (
+        f"({base}) AND ("
+        f"lastmodified > \"{last_time}\" OR "
+        f"(lastmodified = \"{last_time}\" AND id > {int(last_id)})"
+        f")"
     )
 
-with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-    cfg = json.load(f)
+def sync_confluence(cfg: dict, user: str, pw: str):
+    base_url = cfg["confluence_base_url"].rstrip("/")
+    limit = int(cfg.get("limit", 50))
 
-# -----------------------------
-# Directories / settings
-# -----------------------------
-DATA_DIR = cfg.get("data_dir", "./data")
-if not os.path.isabs(DATA_DIR):
-    DATA_DIR = os.path.join(BASE_DIR, DATA_DIR)
-os.makedirs(DATA_DIR, exist_ok=True)
+    # Make data_dir absolute and stable (avoid “different ./data” issues)
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    data_dir = cfg.get("data_dir", "./data")
+    if not os.path.isabs(data_dir):
+        data_dir = os.path.join(base_dir, data_dir)
 
-CHUNKS_PATH = os.path.join(DATA_DIR, "chunks_meta.jsonl")
+    os.makedirs(data_dir, exist_ok=True)
+    raw_dir = os.path.join(data_dir, "raw_pages")
+    os.makedirs(raw_dir, exist_ok=True)
 
-CHUNK_SIZE = int(cfg.get("chunk_words", 250))
-OVERLAP = int(cfg.get("chunk_overlap", 50))
-TOP_K = int(cfg.get("top_k", 8))
+    effective_cql = _build_effective_cql(cfg, data_dir)
+    auth = HTTPBasicAuth(user, pw)
 
-# -----------------------------
-# Streamlit config + session state
-# -----------------------------
-st.set_page_config(page_title="Confluence Doc Search (Local)", layout="wide")
-st.title("Confluence Doc Search (Phase 1 — Local, No LLM)")
-st.caption("Search Confluence docs locally and jump to the exact section. No generation, no hallucinations.")
+    pages = []
+    start = 0
+    total_size = None
 
-if "chunks_meta" not in st.session_state:
-    st.session_state.chunks_meta = None
+    # Track cursor candidates across this run
+    # We want the maximum (minute, id) pair.
+    max_minute = None          # string "YYYY-MM-DD HH:MM"
+    max_id_in_minute = None    # int
 
-if "bm25" not in st.session_state:
-    st.session_state.bm25 = None
+    batch_num = 0
+    max_batches = 1000  # safety
+    seen_batch_first_ids = set()
 
-if "syncing" not in st.session_state:
-    st.session_state.syncing = False
+    while True:
+        batch_num += 1
+        if batch_num > max_batches:
+            raise RuntimeError("Pagination safety stop: too many batches. Likely 'start' ignored.")
 
-if "sync_msg" not in st.session_state:
-    st.session_state.sync_msg = ""
+        url = f"{base_url}/rest/api/content/search"
+        params = {
+            "cql": effective_cql,
+            "start": start,
+            "limit": limit,
+            "expand": "body.storage,version,space,_links"
+        }
 
-# -----------------------------
-# Helpers: save/load cached chunks
-# -----------------------------
-def save_chunks(chunks_meta):
-    with open(CHUNKS_PATH, "w", encoding="utf-8") as f:
-        for item in chunks_meta:
-            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+        r = requests.get(
+            url,
+            params=params,
+            auth=auth,
+            headers={"Accept": "application/json"},
+            timeout=60,
+            verify=False  # local dev only
+        )
 
-def load_chunks():
-    if not os.path.exists(CHUNKS_PATH):
-        return None
-    chunks = []
-    with open(CHUNKS_PATH, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            chunks.append(json.loads(line))
-    return chunks
+        if r.status_code == 400:
+            raise RuntimeError(f"400 from Confluence. CQL was:\n{effective_cql}\n\nResponse:\n{r.text[:800]}")
 
-# -----------------------------
-# Auto-load cached index on startup
-# -----------------------------
-if st.session_state.chunks_meta is None:
-    cached = load_chunks()
-    if cached:
-        st.session_state.chunks_meta = cached
-        st.session_state.bm25 = build_bm25(cached)
+        r.raise_for_status()
+        payload = r.json()
 
-# -----------------------------
-# UI Layout
-# -----------------------------
-col1, col2 = st.columns([1, 2])
+        if total_size is None:
+            total_size = payload.get("totalSize")
 
-with col1:
-    st.subheader("Sync / Index")
+        results = payload.get("results", [])
+        size = payload.get("size", len(results))
 
-    st.write("Pulls Confluence pages using your CQL and updates the local index.")
-    st.code(cfg.get("cql", ""), language="sql")
+        print(f"[SYNC] batch={batch_num} start={start} size={size} totalSize={total_size}")
 
-    # Credentials in UI (no terminal prompts)
-    conf_user = st.text_input("Confluence user", key="conf_user")
-    conf_pass = st.text_input("Confluence password", type="password", key="conf_pass")
+        if not results:
+            break
 
-    if st.button("Sync Now"):
-        st.session_state.syncing = True
-        st.session_state.sync_msg = ""
-        st.rerun()
+        # detect repeating batches
+        first_id = results[0].get("id")
+        if first_id in seen_batch_first_ids:
+            raise RuntimeError(
+                "Pagination loop detected: received the same first page id again. "
+                f"Repeated first_id={first_id}\nEffective CQL={effective_cql}"
+            )
+        seen_batch_first_ids.add(first_id)
 
-    # Run sync job if flagged
-    if st.session_state.syncing:
-        with st.spinner("Syncing Confluence and building index..."):
-            progress = st.progress(0)
-            status = st.empty()
+        for p in results:
+            pid = p["id"]
+            title = p.get("title", "")
+            space = p.get("space", {}).get("key", "")
+            when = p.get("version", {}).get("when", "")
+            html = p.get("body", {}).get("storage", {}).get("value", "")
 
-            if not conf_user or not conf_pass:
-                progress.progress(100)
-                st.session_state.sync_msg = "❌ Enter Confluence username and password."
-                st.session_state.syncing = False
-                st.rerun()
+            # Cursor tracking: compute (minute, id)
+            dt = _parse_confluence_when(when)
+            if dt:
+                minute_str = _format_cql_minute(dt)
+                pid_int = int(pid)
 
-            pages = sync_confluence(cfg, conf_user, conf_pass)
+                if (max_minute is None) or (minute_str > max_minute):
+                    max_minute = minute_str
+                    max_id_in_minute = pid_int
+                elif minute_str == max_minute:
+                    if (max_id_in_minute is None) or (pid_int > max_id_in_minute):
+                        max_id_in_minute = pid_int
 
-            # If no pages returned (common in incremental sync), exit cleanly
-            if not pages:
-                progress.progress(100)
-                st.session_state.sync_msg = "✅ Sync completed: 0 pages returned for this CQL/incremental window. Index unchanged."
-                st.session_state.syncing = False
-                st.rerun()
+            links = p.get("_links", {})
+            webui = links.get("webui", "")
+            page_url = f"{base_url}{webui}" if webui else base_url
 
-            total_pages = len(pages)
-            chunks_meta_new = []
+            rec = {
+                "id": pid,
+                "title": title,
+                "space": space,
+                "updated": when,
+                "url": page_url,
+                "html": html
+            }
+            pages.append(rec)
 
-            for i, p in enumerate(pages, 1):
-                status.write(f"Processing page {i}/{total_pages}: {p.get('title','')}")
-                text = html_to_text(p.get("html", ""))
-                chunks = chunk_words(text, chunk_size=CHUNK_SIZE, overlap=OVERLAP)
+            with open(os.path.join(raw_dir, f"{pid}.json"), "w", encoding="utf-8") as f:
+                json.dump(rec, f, ensure_ascii=False)
 
-                for c in chunks:
-                    chunks_meta_new.append({
-                        "page_id": p.get("id", ""),
-                        "title": p.get("title", ""),
-                        "space": p.get("space", ""),
-                        "updated": p.get("updated", ""),
-                        "url": p.get("url", ""),
-                        "chunk": c
-                    })
+        start += len(results)
 
-                progress.progress(int(i / total_pages * 100))
+        if total_size is not None and start >= total_size:
+            break
+        if len(results) < limit:
+            break
 
-            # Merge incremental updates into cache
-            existing = load_chunks() or []
-            changed_ids = {x["page_id"] for x in chunks_meta_new if x.get("page_id")}
+    # Save meta
+    meta = _load_meta(data_dir)
+    meta["synced_at_epoch"] = time.time()
+    meta["page_count_last_run"] = len(pages)
 
-            # Remove old chunks for changed pages
-            existing = [x for x in existing if x.get("page_id") not in changed_ids]
+    # ✅ Advance cursor only if pages returned and incremental is enabled
+    if cfg.get("incremental_sync", False) and max_minute is not None and max_id_in_minute is not None:
+        meta["last_sync_cql_time"] = max_minute
+        meta["last_sync_last_id"] = int(max_id_in_minute)
 
-            combined = existing + chunks_meta_new
-
-            bm25 = build_bm25(combined)
-            st.session_state.chunks_meta = combined
-            st.session_state.bm25 = bm25
-            save_chunks(combined)
-
-            progress.progress(100)
-            st.session_state.sync_msg = f"✅ Sync done. Updated {len(changed_ids)} pages. Total chunks: {len(combined)}."
-            st.session_state.syncing = False
-            st.rerun()
-
-    if st.session_state.sync_msg:
-        st.info(st.session_state.sync_msg)
-
-    st.markdown("### Index status")
-    if st.session_state.bm25 is None:
-        st.warning("No index loaded. Click **Sync Now**.")
-    else:
-        st.success("Index is loaded and ready to search.")
-        st.write(f"Chunks loaded: **{len(st.session_state.chunks_meta) if st.session_state.chunks_meta else 0}**")
-
-    if st.button("Clear Local Cache"):
-        if os.path.exists(CHUNKS_PATH):
-            os.remove(CHUNKS_PATH)
-        st.session_state.chunks_meta = None
-        st.session_state.bm25 = None
-        st.session_state.sync_msg = "✅ Cache cleared. Please Sync again."
-        st.rerun()
-
-with col2:
-    st.subheader("Search")
-    q = st.text_input("Ask a question / type keywords:")
-
-    if st.button("Search") and q:
-        if st.session_state.bm25 is None or st.session_state.chunks_meta is None:
-            st.error("No index loaded. Click **Sync Now** first.")
-        else:
-            results = search_bm25(q, st.session_state.bm25, st.session_state.chunks_meta, top_k=TOP_K)
-
-            if not results:
-                st.warning("No strong matches found. Try different keywords or widen your CQL scope.")
-            else:
-                st.write(f"Top results: **{len(results)}**")
-                for i, r in enumerate(results, 1):
-                    st.markdown(f"### {i}. {r.get('title','')}")
-                    st.write(
-                        f"**Space:** {r.get('space','')}  |  "
-                        f"**Updated:** {r.get('updated','')}  |  "
-                        f"**Score:** {r.get('score',0):.2f}"
-                    )
-                    chunk = r.get("chunk", "")
-                    st.write(chunk[:900] + ("..." if len(chunk) > 900 else ""))
-                    url = r.get("url", "")
-                    if url:
-                        st.markdown(f"[Open in Confluence]({url})")
-                    st.divider()
+    _save_meta(data_dir, meta)
+    return pages

@@ -8,42 +8,56 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 def _sync_meta_path(data_dir: str) -> str:
     return os.path.join(data_dir, "sync_meta.json")
 
-def _load_last_sync(data_dir: str):
+def _load_meta(data_dir: str) -> dict:
     p = _sync_meta_path(data_dir)
     if not os.path.exists(p):
-        return None
+        return {}
     try:
         with open(p, "r", encoding="utf-8") as f:
-            meta = json.load(f)
-        return meta.get("last_sync_cql_time")
+            return json.load(f)
     except Exception:
-        return None
+        return {}
 
-def _save_last_sync(data_dir: str, last_sync_str: str, page_count: int):
-    meta = {
-        "last_sync_cql_time": last_sync_str,
-        "synced_at_epoch": time.time(),
-        "page_count_last_run": page_count
-    }
+def _save_meta(data_dir: str, meta: dict):
     with open(_sync_meta_path(data_dir), "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
 
-def _format_confluence_cql_time(dt: datetime.datetime) -> str:
-    return dt.strftime("%Y-%m-%d %H:%M")
+def _parse_confluence_when(when_str: str):
+    # Confluence often returns ISO like "2026-02-27T21:30:12.123-0500"
+    # We'll parse it best-effort.
+    if not when_str:
+        return None
+    try:
+        # handle timezone like -0500
+        return datetime.datetime.strptime(when_str, "%Y-%m-%dT%H:%M:%S.%f%z")
+    except Exception:
+        try:
+            return datetime.datetime.strptime(when_str, "%Y-%m-%dT%H:%M:%S%z")
+        except Exception:
+            return None
 
-def _build_effective_cql(cfg, data_dir: str) -> str:
-    base_cql = cfg["cql"].strip()
+def _format_cql_date(dt: datetime.datetime) -> str:
+    """
+    Safer CQL format: date only.
+    This avoids time-format quirks across Confluence setups.
+    """
+    # Convert to local date (drop time)
+    return dt.astimezone().strftime("%Y-%m-%d")
+
+def _build_effective_cql(cfg: dict, data_dir: str) -> str:
+    base = cfg["cql"].strip()
     if not cfg.get("incremental_sync", False):
-        return base_cql
+        return base
 
-    last_sync = _load_last_sync(data_dir)
-    if not last_sync:
-        return base_cql
+    meta = _load_meta(data_dir)
+    last_date = meta.get("last_sync_date")  # "YYYY-MM-DD"
+    if not last_date:
+        return base
 
-    return f"({base_cql}) AND lastmodified > \"{last_sync}\""
+    return f"({base}) AND lastmodified > \"{last_date}\""
 
-def sync_confluence(cfg, user: str, pw: str):
-    base = cfg["confluence_base_url"].rstrip("/")
+def sync_confluence(cfg: dict, user: str, pw: str):
+    base_url = cfg["confluence_base_url"].rstrip("/")
     limit = int(cfg.get("limit", 50))
 
     data_dir = cfg.get("data_dir", "./data")
@@ -56,9 +70,12 @@ def sync_confluence(cfg, user: str, pw: str):
 
     pages = []
     start = 0
+    total_size = None
+
+    latest_when_dt = None  # track max "version.when" we actually receive
 
     while True:
-        url = f"{base}/rest/api/content/search"
+        url = f"{base_url}/rest/api/content/search"
         params = {
             "cql": effective_cql,
             "start": start,
@@ -76,8 +93,11 @@ def sync_confluence(cfg, user: str, pw: str):
         )
         r.raise_for_status()
         payload = r.json()
-        results = payload.get("results", [])
 
+        if total_size is None:
+            total_size = payload.get("totalSize")  # Confluence often provides this
+
+        results = payload.get("results", [])
         if not results:
             break
 
@@ -88,16 +108,20 @@ def sync_confluence(cfg, user: str, pw: str):
             when = p.get("version", {}).get("when", "")
             html = p.get("body", {}).get("storage", {}).get("value", "")
 
+            dt = _parse_confluence_when(when)
+            if dt and (latest_when_dt is None or dt > latest_when_dt):
+                latest_when_dt = dt
+
             links = p.get("_links", {})
             webui = links.get("webui", "")
-            url_page = f"{base}{webui}" if webui else base
+            page_url = f"{base_url}{webui}" if webui else base_url
 
             rec = {
                 "id": pid,
                 "title": title,
                 "space": space,
                 "updated": when,
-                "url": url_page,
+                "url": page_url,
                 "html": html
             }
             pages.append(rec)
@@ -106,10 +130,28 @@ def sync_confluence(cfg, user: str, pw: str):
                 json.dump(rec, f, ensure_ascii=False)
 
         start += len(results)
+
+        # Robust stop condition: if we know totalSize and we've fetched it all
+        if total_size is not None and start >= total_size:
+            break
+
+        # Fallback stop: if less than limit returned
         if len(results) < limit:
             break
 
-    now_str = _format_confluence_cql_time(datetime.datetime.now())
-    _save_last_sync(data_dir, now_str, len(pages))
+    # ✅ Update sync cursor ONLY if we actually got pages
+    if cfg.get("incremental_sync", False) and latest_when_dt is not None:
+        meta = _load_meta(data_dir)
+        # store date-only cursor (safe)
+        meta["last_sync_date"] = _format_cql_date(latest_when_dt)
+        meta["synced_at_epoch"] = time.time()
+        meta["page_count_last_run"] = len(pages)
+        _save_meta(data_dir, meta)
+    else:
+        # still update last run info, but DON'T move cursor on 0 results
+        meta = _load_meta(data_dir)
+        meta["synced_at_epoch"] = time.time()
+        meta["page_count_last_run"] = len(pages)
+        _save_meta(data_dir, meta)
 
     return pages

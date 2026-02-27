@@ -1,80 +1,80 @@
-from rank_bm25 import BM25Okapi
+import os
+import json
+import streamlit as st
+import concurrent.futures
 
-def tokenize(text: str):
-    return [t for t in text.lower().split() if t.strip()]
+from sync_confluence import sync_confluence
+from chunking import html_to_text, chunk_words
+from indexer import build_bm25, search_bm25, tokenize
 
-def build_bm25(chunks_meta):
-    """
-    Build BM25 using pre-tokenized chunks if available.
-    """
-    if not chunks_meta:
-        return BM25Okapi([[]])
+# -----------------------------
+# Config Loading
+# -----------------------------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 
-    # Prefer precomputed tokens if present
-    if "tokens" in chunks_meta[0] and isinstance(chunks_meta[0]["tokens"], list):
-        corpus_tokens = [x.get("tokens", []) for x in chunks_meta]
-    else:
-        corpus_tokens = [tokenize(x.get("chunk", "")) for x in chunks_meta]
+if not os.path.exists(CONFIG_PATH):
+    raise FileNotFoundError(f"config.json not found at {CONFIG_PATH}")
 
-    return BM25Okapi(corpus_tokens)
+with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+    cfg = json.load(f)
 
-def search_bm25(query: str, bm25, chunks_meta, top_k=8):
-    q_tokens = tokenize(query)
-    scores = bm25.get_scores(q_tokens)
+DATA_DIR = cfg.get("data_dir", "./data")
+if not os.path.isabs(DATA_DIR):
+    DATA_DIR = os.path.join(BASE_DIR, DATA_DIR)
+os.makedirs(DATA_DIR, exist_ok=True)
 
-    ranked = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)[:top_k]
-    results = []
-    for idx, score in ranked:
-        if score <= 0:
-            continue
-        item = dict(chunks_meta[idx])
-        item["score"] = float(score)
-        results.append(item)
-    return results
+CHUNKS_PATH = os.path.join(DATA_DIR, "chunks_meta.jsonl")
 
+CHUNK_SIZE = int(cfg.get("chunk_words", 250))
+OVERLAP = int(cfg.get("chunk_overlap", 50))
+TOP_K = int(cfg.get("top_k", 8))
 
+# -----------------------------
+# Streamlit Setup
+# -----------------------------
+st.set_page_config(page_title="Confluence Doc Search", layout="wide")
+st.title("Confluence Internal Doc Search (Local BM25)")
+st.caption("Fully local. No external models. No hallucination.")
 
+# -----------------------------
+# Session State
+# -----------------------------
+if "chunks_meta" not in st.session_state:
+    st.session_state.chunks_meta = None
 
+if "bm25" not in st.session_state:
+    st.session_state.bm25 = None
 
+if "syncing" not in st.session_state:
+    st.session_state.syncing = False
 
+if "sync_msg" not in st.session_state:
+    st.session_state.sync_msg = ""
 
+# -----------------------------
+# Cache Helpers
+# -----------------------------
+def save_chunks(chunks_meta):
+    with open(CHUNKS_PATH, "w", encoding="utf-8") as f:
+        for item in chunks_meta:
+            f.write(json.dumps(item, ensure_ascii=False) + "\n")
 
+def load_chunks():
+    if not os.path.exists(CHUNKS_PATH):
+        return None
+    chunks = []
+    with open(CHUNKS_PATH, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                chunks.append(json.loads(line))
+    return chunks
 
-
-
-
-chunks_meta_new.append({
-    "page_id": ...,
-    "title": ...,
-    "space": ...,
-    "updated": ...,
-    "url": ...,
-    "chunk": c
-})
-
-
-
-
-
-from indexer import tokenize  # add to top imports OR import inside block
-
-chunks_meta_new.append({
-    "page_id": p.get("id", ""),
-    "title": p.get("title", ""),
-    "space": p.get("space", ""),
-    "updated": p.get("updated", ""),
-    "url": p.get("url", ""),
-    "chunk": c,
-    "tokens": tokenize(c)   # ✅ pre-tokenize once
-})
-
-
-
-
+# -----------------------------
+# Parallel Page Processing (Upgrade C)
+# -----------------------------
 def process_page_to_chunks(p, chunk_size, overlap):
-    """
-    Convert one Confluence page dict -> list of chunk_meta dicts (with tokens).
-    """
     text = html_to_text(p.get("html", ""))
     chunks = chunk_words(text, chunk_size=chunk_size, overlap=overlap)
 
@@ -87,49 +87,136 @@ def process_page_to_chunks(p, chunk_size, overlap):
             "updated": p.get("updated", ""),
             "url": p.get("url", ""),
             "chunk": c,
-            "tokens": tokenize(c)
+            "tokens": tokenize(c)  # Upgrade B
         })
     return out
 
+# -----------------------------
+# Auto Load Existing Index
+# -----------------------------
+if st.session_state.chunks_meta is None:
+    cached = load_chunks()
+    if cached:
+        st.session_state.chunks_meta = cached
+        st.session_state.bm25 = build_bm25(cached)
 
+# -----------------------------
+# Layout
+# -----------------------------
+col1, col2 = st.columns([1, 2])
 
+with col1:
+    st.subheader("Sync / Index")
 
+    st.code(cfg.get("cql", ""), language="sql")
 
+    conf_user = st.text_input("Confluence user")
+    conf_pass = st.text_input("Confluence password", type="password")
 
+    if st.button("Sync Now"):
+        st.session_state.syncing = True
+        st.session_state.sync_msg = ""
+        st.rerun()
 
+    if st.session_state.syncing:
+        with st.spinner("Syncing Confluence and building index..."):
+            progress = st.progress(0)
+            status = st.empty()
 
+            if not conf_user or not conf_pass:
+                progress.progress(100)
+                st.session_state.sync_msg = "❌ Enter credentials."
+                st.session_state.syncing = False
+                st.rerun()
 
+            pages = sync_confluence(cfg, conf_user, conf_pass)
 
+            if not pages:
+                progress.progress(100)
+                st.session_state.sync_msg = "✅ No updated pages found."
+                st.session_state.syncing = False
+                st.rerun()
 
+            total_pages = len(pages)
+            chunks_meta_new = []
 
+            max_workers = min(16, (os.cpu_count() or 4))
+            status.write(f"Parallel processing with {max_workers} workers...")
 
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+                futures = {
+                    ex.submit(process_page_to_chunks, p, CHUNK_SIZE, OVERLAP): p
+                    for p in pages
+                }
 
+                done_count = 0
+                for fut in concurrent.futures.as_completed(futures):
+                    p = futures[fut]
+                    try:
+                        page_chunks = fut.result()
+                        chunks_meta_new.extend(page_chunks)
+                    except Exception as e:
+                        status.write(f"⚠ Failed page: {p.get('title','')} — {e}")
 
+                    done_count += 1
+                    progress.progress(int(done_count / total_pages * 100))
 
+            # Merge incremental updates
+            existing = load_chunks() or []
+            changed_ids = {x["page_id"] for x in chunks_meta_new if x.get("page_id")}
+            existing = [x for x in existing if x.get("page_id") not in changed_ids]
 
+            combined = existing + chunks_meta_new
 
-total_pages = len(pages)
-chunks_meta_new = []
+            bm25 = build_bm25(combined)
 
-max_workers = min(16, (os.cpu_count() or 4))  # safe default
-status.write(f"Parallel processing with {max_workers} workers...")
+            st.session_state.chunks_meta = combined
+            st.session_state.bm25 = bm25
+            save_chunks(combined)
 
-with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
-    futures = {
-        ex.submit(process_page_to_chunks, p, CHUNK_SIZE, OVERLAP): p
-        for p in pages
-    }
+            progress.progress(100)
+            st.session_state.sync_msg = f"✅ Sync complete. Updated {len(changed_ids)} pages. Total chunks: {len(combined)}."
+            st.session_state.syncing = False
+            st.rerun()
 
-    done_count = 0
-    for fut in concurrent.futures.as_completed(futures):
-        p = futures[fut]
-        try:
-            page_chunks = fut.result()
-            chunks_meta_new.extend(page_chunks)
-        except Exception as e:
-            # Keep going even if one page fails
-            status.write(f"⚠️ Failed page: {p.get('title','(no title)')} — {e}")
+    if st.session_state.sync_msg:
+        st.info(st.session_state.sync_msg)
 
-        done_count += 1
-        progress.progress(int(done_count / total_pages * 100))
-        status.write(f"Processed {done_count}/{total_pages} pages...")
+    st.markdown("### Index Status")
+    if st.session_state.bm25:
+        st.success(f"Index loaded: {len(st.session_state.chunks_meta)} chunks")
+    else:
+        st.warning("No index loaded yet.")
+
+    if st.button("Clear Cache"):
+        if os.path.exists(CHUNKS_PATH):
+            os.remove(CHUNKS_PATH)
+        st.session_state.chunks_meta = None
+        st.session_state.bm25 = None
+        st.session_state.sync_msg = "Cache cleared."
+        st.rerun()
+
+# -----------------------------
+# Search UI
+# -----------------------------
+with col2:
+    st.subheader("Search")
+
+    q = st.text_input("Enter keywords")
+
+    if st.button("Search") and q:
+        if not st.session_state.bm25:
+            st.error("No index loaded. Sync first.")
+        else:
+            results = search_bm25(q, st.session_state.bm25, st.session_state.chunks_meta, TOP_K)
+
+            if not results:
+                st.warning("No matches found.")
+            else:
+                for i, r in enumerate(results, 1):
+                    st.markdown(f"### {i}. {r['title']}")
+                    st.write(f"Space: {r['space']} | Updated: {r['updated']} | Score: {r['score']:.2f}")
+                    st.write(r["chunk"][:900] + ("..." if len(r["chunk"]) > 900 else ""))
+                    if r.get("url"):
+                        st.markdown(f"[Open in Confluence]({r['url']})")
+                    st.divider()

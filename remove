@@ -1,181 +1,133 @@
-import os
-import json
-import streamlit as st
+import os, json, time, datetime
+import requests
+import urllib3
+import getpass
+from requests.auth import HTTPBasicAuth
 
-from sync_confluence import sync_confluence
-from chunking import html_to_text, chunk_words
-from indexer import build_bm25, search_bm25
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# -----------------------------
-# Robust config loading
-# -----------------------------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+def _sync_meta_path(data_dir: str) -> str:
+    return os.path.join(data_dir, "sync_meta.json")
 
-if not os.path.exists(CONFIG_PATH):
-    raise FileNotFoundError(
-        f"config.json not found at: {CONFIG_PATH}\n"
-        f"Make sure config.json is in the same folder as app.py"
-    )
-
-with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-    cfg = json.load(f)
-
-# -----------------------------
-# Directories / settings
-# -----------------------------
-DATA_DIR = cfg.get("data_dir", "./data")
-if not os.path.isabs(DATA_DIR):
-    DATA_DIR = os.path.join(BASE_DIR, DATA_DIR)
-
-os.makedirs(DATA_DIR, exist_ok=True)
-
-CHUNKS_PATH = os.path.join(DATA_DIR, "chunks_meta.jsonl")
-
-CHUNK_SIZE = int(cfg.get("chunk_words", 250))
-OVERLAP = int(cfg.get("chunk_overlap", 50))
-TOP_K = int(cfg.get("top_k", 8))
-
-# -----------------------------
-# Streamlit config + session state
-# -----------------------------
-st.set_page_config(page_title="Confluence Doc Search (Local)", layout="wide")
-st.title("Confluence Doc Search (Phase 1 — Local, No LLM)")
-st.caption("Search Confluence docs locally and jump to the exact section. No generation, no hallucinations.")
-
-if "chunks_meta" not in st.session_state:
-    st.session_state.chunks_meta = None
-
-if "bm25" not in st.session_state:
-    st.session_state.bm25 = None
-
-# -----------------------------
-# Helpers: save/load cached chunks
-# -----------------------------
-def save_chunks(chunks_meta):
-    with open(CHUNKS_PATH, "w", encoding="utf-8") as f:
-        for item in chunks_meta:
-            f.write(json.dumps(item, ensure_ascii=False) + "\n")
-
-def load_chunks():
-    if not os.path.exists(CHUNKS_PATH):
+def _load_last_sync(data_dir: str):
+    p = _sync_meta_path(data_dir)
+    if not os.path.exists(p):
         return None
-    chunks = []
-    with open(CHUNKS_PATH, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            chunks.append(json.loads(line))
-    return chunks
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        return meta.get("last_sync_cql_time")  # string
+    except Exception:
+        return None
 
-# -----------------------------
-# Auto-load cached index on startup
-# -----------------------------
-if st.session_state.chunks_meta is None:
-    cached = load_chunks()
-    if cached:
-        st.session_state.chunks_meta = cached
-        st.session_state.bm25 = build_bm25(cached)
+def _save_last_sync(data_dir: str, last_sync_str: str, page_count: int):
+    meta = {
+        "last_sync_cql_time": last_sync_str,
+        "synced_at_epoch": time.time(),
+        "page_count_last_run": page_count
+    }
+    with open(_sync_meta_path(data_dir), "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
 
-# -----------------------------
-# UI Layout
-# -----------------------------
-col1, col2 = st.columns([1, 2])
+def _format_confluence_cql_time(dt: datetime.datetime) -> str:
+    # Confluence CQL supports date/time strings; this format is widely accepted.
+    # Example: 2026-02-27 21:30
+    return dt.strftime("%Y-%m-%d %H:%M")
 
-with col1:
-    st.subheader("Sync / Index")
+def _build_effective_cql(cfg, data_dir: str) -> str:
+    base_cql = cfg["cql"].strip()
+    if not cfg.get("incremental_sync", False):
+        return base_cql
 
-    st.write("This pulls Confluence pages using your CQL and builds a local BM25 index.")
-    st.code(cfg.get("cql", ""), language="sql")
+    last_sync = _load_last_sync(data_dir)
+    if not last_sync:
+        return base_cql
 
-    if st.button("Sync Now"):
-        with st.spinner("Syncing Confluence and building index..."):
-            progress = st.progress(0)
-            status = st.empty()
+    # Wrap base query to preserve precedence, then append lastmodified filter
+    return f"({base_cql}) AND lastmodified > \"{last_sync}\""
 
-            # Pull pages
-            pages = sync_confluence(cfg)
-            total_pages = max(1, len(pages))
+def sync_confluence(cfg):
+    base = cfg["confluence_base_url"].rstrip("/")
+    limit = int(cfg.get("limit", 50))
 
-            chunks_meta = []
+    data_dir = cfg.get("data_dir", "./data")
+    os.makedirs(data_dir, exist_ok=True)
+    raw_dir = os.path.join(data_dir, "raw_pages")
+    os.makedirs(raw_dir, exist_ok=True)
 
-            # Build chunks
-            for i, p in enumerate(pages, 1):
-                title = p.get("title", "")
-                status.write(f"Processing page {i}/{total_pages}: {title}")
+    effective_cql = _build_effective_cql(cfg, data_dir)
 
-                text = html_to_text(p.get("html", ""))
-                chunks = chunk_words(text, chunk_size=CHUNK_SIZE, overlap=OVERLAP)
+    # Prompt for credentials (masked)
+    user = input("Confluence user: ")
+    pw = getpass.getpass("Confluence password: ")
+    auth = HTTPBasicAuth(user, pw)
 
-                for c in chunks:
-                    chunks_meta.append({
-                        "title": p.get("title", ""),
-                        "space": p.get("space", ""),
-                        "updated": p.get("updated", ""),
-                        "url": p.get("url", ""),
-                        "chunk": c
-                    })
+    pages = []
+    start = 0
 
-                progress.progress(int(i / total_pages * 100))
+    while True:
+        url = f"{base}/rest/api/content/search"
+        params = {
+            "cql": effective_cql,
+            "start": start,
+            "limit": limit,
+            "expand": "body.storage,version,space,_links"
+        }
 
-            # Build BM25
-            bm25 = build_bm25(chunks_meta)
+        r = requests.get(
+            url,
+            params=params,
+            auth=auth,
+            headers={"Accept": "application/json"},
+            timeout=60,
+            verify=False  # local dev only
+        )
 
-            # Save to session + disk cache
-            st.session_state.chunks_meta = chunks_meta
-            st.session_state.bm25 = bm25
-            save_chunks(chunks_meta)
+        r.raise_for_status()
+        payload = r.json()
+        results = payload.get("results", [])
 
-            progress.progress(100)
-            status.write("✅ Done.")
-            st.success(f"Indexed {len(chunks_meta)} chunks from {len(pages)} pages.")
-            st.info(f"Cached chunks saved to: {CHUNKS_PATH}")
+        if not results:
+            break
 
-    st.markdown("### Index status")
-    if st.session_state.bm25 is None:
-        st.warning("No index loaded. Click **Sync Now**.")
-    else:
-        st.success("Index is loaded and ready to search.")
-        if st.session_state.chunks_meta:
-            st.write(f"Chunks loaded: **{len(st.session_state.chunks_meta)}**")
+        for p in results:
+            pid = p["id"]
+            title = p.get("title", "")
+            space = p.get("space", {}).get("key", "")
+            when = p.get("version", {}).get("when", "")
+            html = p.get("body", {}).get("storage", {}).get("value", "")
 
-    if os.path.exists(CHUNKS_PATH):
-        st.write("Cache file found ✅")
-    else:
-        st.write("Cache file not found yet (will be created after first sync).")
+            links = p.get("_links", {})
+            webui = links.get("webui", "")
+            url_page = f"{base}{webui}" if webui else base
 
-    if st.button("Clear Local Cache"):
-        if os.path.exists(CHUNKS_PATH):
-            os.remove(CHUNKS_PATH)
-        st.session_state.chunks_meta = None
-        st.session_state.bm25 = None
-        st.success("Cache cleared. Please Sync again.")
+            rec = {
+                "id": pid,
+                "title": title,
+                "space": space,
+                "updated": when,
+                "url": url_page,
+                "html": html
+            }
 
-with col2:
-    st.subheader("Search")
-    q = st.text_input("Ask a question / type keywords:")
+            pages.append(rec)
 
-    if st.button("Search") and q:
-        if st.session_state.bm25 is None or st.session_state.chunks_meta is None:
-            st.error("No index loaded. Click **Sync Now** first.")
-        else:
-            results = search_bm25(q, st.session_state.bm25, st.session_state.chunks_meta, top_k=TOP_K)
+            with open(os.path.join(raw_dir, f"{pid}.json"), "w", encoding="utf-8") as f:
+                json.dump(rec, f, ensure_ascii=False)
 
-            if not results:
-                st.warning("No strong matches found. Try different keywords or widen your CQL scope.")
-            else:
-                st.write(f"Top results: **{len(results)}**")
-                for i, r in enumerate(results, 1):
-                    st.markdown(f"### {i}. {r.get('title','')}")
-                    st.write(
-                        f"**Space:** {r.get('space','')}  |  "
-                        f"**Updated:** {r.get('updated','')}  |  "
-                        f"**Score:** {r.get('score',0):.2f}"
-                    )
-                    chunk = r.get("chunk", "")
-                    st.write(chunk[:900] + ("..." if len(chunk) > 900 else ""))
-                    url = r.get("url", "")
-                    if url:
-                        st.markdown(f"[Open in Confluence]({url})")
-                    st.divider()
+        start += len(results)
+        if len(results) < limit:
+            break
+
+    # Save last sync time as "now" for next incremental run
+    now_str = _format_confluence_cql_time(datetime.datetime.now())
+    _save_last_sync(data_dir, now_str, len(pages))
+
+    return pages
+
+if __name__ == "__main__":
+    with open("config.json", "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+
+    pages = sync_confluence(cfg)
+    print(f"Synced {len(pages)} pages.")

@@ -1,76 +1,16 @@
-import os, json, time, datetime
-import requests
-import urllib3
-from requests.auth import HTTPBasicAuth
-
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-def _sync_meta_path(data_dir: str) -> str:
-    return os.path.join(data_dir, "sync_meta.json")
-
-def _load_meta(data_dir: str) -> dict:
-    p = _sync_meta_path(data_dir)
-    if not os.path.exists(p):
-        return {}
-    try:
-        with open(p, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-def _save_meta(data_dir: str, meta: dict):
-    with open(_sync_meta_path(data_dir), "w", encoding="utf-8") as f:
-        json.dump(meta, f, indent=2)
-
-def _parse_confluence_when(when_str: str):
-    # Example: "2026-02-27T21:30:12.123-0500"
-    if not when_str:
-        return None
-    for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
-        try:
-            return datetime.datetime.strptime(when_str, fmt)
-        except Exception:
-            pass
-    return None
-
-def _format_cql_time_minute(dt: datetime.datetime) -> str:
-    """
-    Confluence CQL accepts:
-      "yyyy-MM-dd HH:mm" (no seconds)
-    """
-    local_dt = dt.astimezone().replace(tzinfo=None)
-    return local_dt.strftime("%Y-%m-%d %H:%M")
-
-def _build_effective_cql(cfg: dict, data_dir: str) -> str:
-    base = cfg["cql"].strip()
-    if not cfg.get("incremental_sync", False):
-        return base
-
-    meta = _load_meta(data_dir)
-    last_time = meta.get("last_sync_cql_time")  # "YYYY-MM-DD HH:MM"
-    if not last_time:
-        return base
-
-    return f"({base}) AND lastmodified > \"{last_time}\""
-
-def sync_confluence(cfg: dict, user: str, pw: str):
-    base_url = cfg["confluence_base_url"].rstrip("/")
-    limit = int(cfg.get("limit", 50))
-
-    data_dir = cfg.get("data_dir", "./data")
-    os.makedirs(data_dir, exist_ok=True)
-    raw_dir = os.path.join(data_dir, "raw_pages")
-    os.makedirs(raw_dir, exist_ok=True)
-
-    effective_cql = _build_effective_cql(cfg, data_dir)
-    auth = HTTPBasicAuth(user, pw)
-
     pages = []
     start = 0
     total_size = None
-    latest_when_dt = None
 
+    seen_batch_first_ids = set()
+    max_batches = 500  # safety stop (adjust if needed)
+
+    batch_num = 0
     while True:
+        batch_num += 1
+        if batch_num > max_batches:
+            raise RuntimeError("Pagination safety stop: too many batches. Likely 'start' is being ignored.")
+
         url = f"{base_url}/rest/api/content/search"
         params = {
             "cql": effective_cql,
@@ -88,19 +28,34 @@ def sync_confluence(cfg: dict, user: str, pw: str):
             verify=False  # local dev only
         )
 
-        # Helpful error message on 400
         if r.status_code == 400:
             raise RuntimeError(f"400 from Confluence. CQL was:\n{effective_cql}\n\nResponse:\n{r.text[:800]}")
 
         r.raise_for_status()
         payload = r.json()
 
+        # Confluence usually includes totalSize/size
         if total_size is None:
             total_size = payload.get("totalSize")
 
         results = payload.get("results", [])
+        size = payload.get("size", len(results))
+
+        print(f"[SYNC] batch={batch_num} start={start} size={size} totalSize={total_size}")
+
         if not results:
             break
+
+        # Detect repeating batches (start ignored / proxy caching)
+        first_id = results[0].get("id")
+        if first_id in seen_batch_first_ids:
+            raise RuntimeError(
+                "Pagination loop detected: received the same first page id again. "
+                "This suggests Confluence is ignoring 'start' or returning cached results.\n"
+                f"Repeated first_id={first_id}\n"
+                f"Effective CQL={effective_cql}"
+            )
+        seen_batch_first_ids.add(first_id)
 
         for p in results:
             pid = p["id"]
@@ -108,10 +63,6 @@ def sync_confluence(cfg: dict, user: str, pw: str):
             space = p.get("space", {}).get("key", "")
             when = p.get("version", {}).get("when", "")
             html = p.get("body", {}).get("storage", {}).get("value", "")
-
-            dt = _parse_confluence_when(when)
-            if dt and (latest_when_dt is None or dt > latest_when_dt):
-                latest_when_dt = dt
 
             links = p.get("_links", {})
             webui = links.get("webui", "")
@@ -130,21 +81,18 @@ def sync_confluence(cfg: dict, user: str, pw: str):
             with open(os.path.join(raw_dir, f"{pid}.json"), "w", encoding="utf-8") as f:
                 json.dump(rec, f, ensure_ascii=False)
 
+        # Advance pagination
+        prev_start = start
         start += len(results)
+
+        # If start didn't change, bail (should never happen, but safety)
+        if start == prev_start:
+            raise RuntimeError("Pagination did not advance (start unchanged).")
+
+        # Robust stop if totalSize exists
         if total_size is not None and start >= total_size:
             break
+
+        # Fallback stop: if fewer than limit returned
         if len(results) < limit:
             break
-
-    meta = _load_meta(data_dir)
-    meta["synced_at_epoch"] = time.time()
-    meta["page_count_last_run"] = len(pages)
-
-    # ✅ Advance cursor only if we got pages
-    if cfg.get("incremental_sync", False) and latest_when_dt is not None:
-        # Add +1 minute so we don't re-fetch same-minute items forever
-        latest_when_dt = latest_when_dt + datetime.timedelta(minutes=1)
-        meta["last_sync_cql_time"] = _format_cql_time_minute(latest_when_dt)
-
-    _save_meta(data_dir, meta)
-    return pages

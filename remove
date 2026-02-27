@@ -33,13 +33,13 @@ def _parse_confluence_when(when_str: str):
             pass
     return None
 
-def _format_cql_time(dt: datetime.datetime) -> str:
+def _format_cql_time_minute(dt: datetime.datetime) -> str:
     """
-    Use a time format that Confluence CQL commonly accepts.
-    We drop timezone and keep seconds.
+    Confluence CQL accepts:
+      "yyyy-MM-dd HH:mm" (no seconds)
     """
     local_dt = dt.astimezone().replace(tzinfo=None)
-    return local_dt.strftime("%Y-%m-%d %H:%M:%S")
+    return local_dt.strftime("%Y-%m-%d %H:%M")
 
 def _build_effective_cql(cfg: dict, data_dir: str) -> str:
     base = cfg["cql"].strip()
@@ -47,7 +47,7 @@ def _build_effective_cql(cfg: dict, data_dir: str) -> str:
         return base
 
     meta = _load_meta(data_dir)
-    last_time = meta.get("last_sync_cql_time")  # "YYYY-MM-DD HH:MM:SS"
+    last_time = meta.get("last_sync_cql_time")  # "YYYY-MM-DD HH:MM"
     if not last_time:
         return base
 
@@ -68,7 +68,6 @@ def sync_confluence(cfg: dict, user: str, pw: str):
     pages = []
     start = 0
     total_size = None
-
     latest_when_dt = None
 
     while True:
@@ -88,6 +87,11 @@ def sync_confluence(cfg: dict, user: str, pw: str):
             timeout=60,
             verify=False  # local dev only
         )
+
+        # Helpful error message on 400
+        if r.status_code == 400:
+            raise RuntimeError(f"400 from Confluence. CQL was:\n{effective_cql}\n\nResponse:\n{r.text[:800]}")
+
         r.raise_for_status()
         payload = r.json()
 
@@ -127,7 +131,6 @@ def sync_confluence(cfg: dict, user: str, pw: str):
                 json.dump(rec, f, ensure_ascii=False)
 
         start += len(results)
-
         if total_size is not None and start >= total_size:
             break
         if len(results) < limit:
@@ -137,11 +140,11 @@ def sync_confluence(cfg: dict, user: str, pw: str):
     meta["synced_at_epoch"] = time.time()
     meta["page_count_last_run"] = len(pages)
 
-    # ✅ Only advance cursor if we actually got pages
+    # ✅ Advance cursor only if we got pages
     if cfg.get("incremental_sync", False) and latest_when_dt is not None:
-        # add +1 second to avoid re-fetching the last item again
-        latest_when_dt = latest_when_dt + datetime.timedelta(seconds=1)
-        meta["last_sync_cql_time"] = _format_cql_time(latest_when_dt)
+        # Add +1 minute so we don't re-fetch same-minute items forever
+        latest_when_dt = latest_when_dt + datetime.timedelta(minutes=1)
+        meta["last_sync_cql_time"] = _format_cql_time_minute(latest_when_dt)
 
     _save_meta(data_dir, meta)
     return pages

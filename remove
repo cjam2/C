@@ -1,55 +1,233 @@
-import random
+import re
+from collections import defaultdict
 
-def get_with_retries(url, *, params, auth, headers, timeout, verify, max_retries=8):
+def classify_question(q: str) -> str:
     """
-    Retries on rate limiting (429) and transient errors (502/503/504).
-    Honors Retry-After if provided. Uses exponential backoff + jitter otherwise.
+    Cheap rule-based classification. Improves response style without an LLM.
     """
-    attempt = 0
-    while True:
-        r = requests.get(
-            url,
-            params=params,
-            auth=auth,
-            headers=headers,
-            timeout=timeout,
-            verify=verify,
-        )
+    s = q.strip().lower()
+    if any(s.startswith(x) for x in ["how do i", "how to", "how can", "steps", "procedure", "setup", "configure", "install"]):
+        return "howto"
+    if any(s.startswith(x) for x in ["why", "root cause", "reason", "because"]):
+        return "why"
+    if any(s.startswith(x) for x in ["what is", "what are", "define", "meaning", "explain"]):
+        return "definition"
+    if any(s.startswith(x) for x in ["where", "which page", "which doc", "link", "url"]):
+        return "where"
+    if any(s.startswith(x) for x in ["when", "date", "timeline", "deadline"]):
+        return "when"
+    if any(x in s for x in ["error", "failed", "failure", "exception", "stack trace", "429", "401", "timeout"]):
+        return "troubleshoot"
+    return "general"
 
-        # Success
-        if r.status_code < 400:
-            return r
 
-        # 400 is a real error (CQL etc.) -> do not retry
-        if r.status_code == 400:
-            raise RuntimeError(
-                f"400 from Confluence. CQL was:\n{params.get('cql')}\n\nResponse:\n{r.text[:800]}"
-            )
+def split_sentences(text: str):
+    """
+    Simple sentence splitter (no nltk). Good enough for docs.
+    """
+    if not text:
+        return []
+    text = re.sub(r"\s+", " ", text).strip()
+    parts = re.split(r"(?<=[.!?])\s+(?=[A-Z0-9\[])", text)
+    return [p.strip() for p in parts if p.strip()]
 
-        # Retry-able: rate limit / transient gateway issues
-        if r.status_code in (429, 502, 503, 504):
-            attempt += 1
-            if attempt > max_retries:
-                raise RuntimeError(
-                    f"Confluence request failed after {max_retries} retries "
-                    f"(last status={r.status_code}). Response:\n{r.text[:500]}"
-                )
 
-            retry_after = r.headers.get("Retry-After")
-            if retry_after:
-                # Retry-After can be seconds
-                try:
-                    sleep_s = int(retry_after)
-                except Exception:
-                    sleep_s = 5
-            else:
-                # Exponential backoff with jitter: 1,2,4,8,... capped
-                base = min(60, 2 ** (attempt - 1))
-                sleep_s = base + random.uniform(0, 1.5)
+def score_overlap(query_tokens, sent_tokens):
+    """
+    Lexical overlap score normalized by query size.
+    """
+    if not sent_tokens:
+        return 0.0
+    q = set(query_tokens)
+    s = set(sent_tokens)
+    ov = len(q & s)
+    if ov == 0:
+        return 0.0
+    return ov / max(1, len(q))
 
-            print(f"[THROTTLE] status={r.status_code} attempt={attempt}/{max_retries} sleeping={sleep_s:.1f}s")
-            time.sleep(sleep_s)
-            continue
 
-        # Other errors: raise immediately
-        r.raise_for_status()
+def highlight_keywords(text: str, query: str):
+    """
+    Highlights query tokens using <mark>. Streamlit can render unsafe HTML if enabled.
+    We'll keep it safe-ish by escaping only minimal and not injecting user HTML.
+    """
+    if not text:
+        return ""
+    tokens = [t for t in tokenize(query) if len(t) >= 3]
+    if not tokens:
+        return text
+
+    # Unique + longer first to avoid partial overlaps
+    tokens = sorted(set(tokens), key=len, reverse=True)
+
+    def repl(match):
+        return f"<mark>{match.group(0)}</mark>"
+
+    out = text
+    for tok in tokens[:12]:
+        out = re.sub(rf"(?i)\b{re.escape(tok)}\b", repl, out)
+    return out
+
+
+def fuse_sentences(candidates, max_groups=5, max_sentences_per_group=3):
+    """
+    Sentence fusion:
+    - groups sentences by (url, title)
+    - picks top ones and merges into short coherent bullets per page
+    """
+    by_page = defaultdict(list)
+    for c in candidates:
+        key = (c.get("url", ""), c.get("title", ""))
+        by_page[key].append(c)
+
+    fused = []
+    for (url, title), sents in by_page.items():
+        sents.sort(key=lambda x: x["score"], reverse=True)
+        chosen = sents[: max_sentences_per_group]
+
+        # Deduplicate very similar starts
+        seen = set()
+        cleaned = []
+        for x in chosen:
+            k = x["sentence"][:80]
+            if k in seen:
+                continue
+            seen.add(k)
+            cleaned.append(x["sentence"])
+
+        if cleaned:
+            fused.append({
+                "title": title,
+                "url": url,
+                "score": sents[0]["score"],
+                "text": " ".join(cleaned)
+            })
+
+    fused.sort(key=lambda x: x["score"], reverse=True)
+    return fused[:max_groups]
+
+
+def extract_top_sentences_from_chunks(query: str, retrieved_chunks: list, max_candidates=60):
+    """
+    Build a pool of candidate sentences from top chunks.
+    """
+    q_tokens = tokenize(query)
+    candidates = []
+    for r in retrieved_chunks:
+        chunk = r.get("chunk", "")
+        for sent in split_sentences(chunk):
+            stoks = tokenize(sent)
+            sc = score_overlap(q_tokens, stoks)
+            if sc <= 0:
+                continue
+            candidates.append({
+                "score": sc,
+                "sentence": sent,
+                "title": r.get("title", ""),
+                "url": r.get("url", ""),
+                "space": r.get("space", ""),
+                "updated": r.get("updated", "")
+            })
+
+    candidates.sort(key=lambda x: x["score"], reverse=True)
+    return candidates[:max_candidates]
+
+
+def page_summaries(query: str, retrieved_chunks: list, top_pages=5, sentences_per_page=2):
+    """
+    Page summarization (query-aware):
+    - groups by page (url/title)
+    - chooses best sentences per page
+    """
+    candidates = extract_top_sentences_from_chunks(query, retrieved_chunks, max_candidates=200)
+    by_page = defaultdict(list)
+    for c in candidates:
+        by_page[(c.get("url", ""), c.get("title", ""))].append(c)
+
+    summaries = []
+    for (url, title), sents in by_page.items():
+        sents.sort(key=lambda x: x["score"], reverse=True)
+        picked = [x["sentence"] for x in sents[:sentences_per_page]]
+        if picked:
+            summaries.append({
+                "title": title,
+                "url": url,
+                "score": sents[0]["score"],
+                "summary": " ".join(picked)
+            })
+
+    summaries.sort(key=lambda x: x["score"], reverse=True)
+    return summaries[:top_pages]
+
+
+
+
+
+qtype = classify_question(prompt)
+
+retrieved = search_bm25(
+    prompt,
+    st.session_state.bm25,
+    st.session_state.chunks_meta,
+    top_k=50
+)
+
+retrieved_top = retrieved[:15]  # context window for extractive layer
+
+# Sentence candidates + fusion
+cands = extract_top_sentences_from_chunks(prompt, retrieved_top, max_candidates=80)
+fused = fuse_sentences(cands, max_groups=5, max_sentences_per_group=3)
+
+# Page summaries
+summaries = page_summaries(prompt, retrieved_top, top_pages=5, sentences_per_page=2)
+
+# Build assistant message text
+lines = []
+
+# response “style” based on question type
+if qtype == "howto":
+    lines.append("**Suggested steps from the docs:**")
+elif qtype == "troubleshoot":
+    lines.append("**What the docs suggest (likely causes / fixes):**")
+elif qtype == "definition":
+    lines.append("**Definition / explanation from the docs:**")
+else:
+    lines.append("**What I found in the docs:**")
+
+if not fused:
+    lines.append("I couldn’t find a strong, sentence-level match. Try different keywords or broaden the CQL scope.")
+else:
+    for item in fused:
+        txt = highlight_keywords(item["text"], prompt)
+        # Use markdown + HTML highlight (see rendering note below)
+        lines.append(f"- {txt}")
+
+# Page summaries section (navigation aid)
+if summaries:
+    lines.append("\n**Top pages (quick summaries):**")
+    for s in summaries:
+        sm = highlight_keywords(s["summary"], prompt)
+        if s.get("url"):
+            lines.append(f"- [{s['title']}]({s['url']}): {sm}")
+        else:
+            lines.append(f"- {s['title']}: {sm}")
+
+assistant_text = "\n".join(lines)
+
+
+
+
+
+
+
+
+st.markdown(assistant_text, unsafe_allow_html=True)
+
+
+with st.chat_message("assistant"):
+    st.markdown(assistant_text, unsafe_allow_html=True)
+
+
+
+st.markdown(highlight_keywords(r["chunk"][:900], prompt), unsafe_allow_html=True)
+

@@ -1,9 +1,8 @@
 import os
 import json
 import re
-import time
-from collections import defaultdict
 import concurrent.futures
+from collections import defaultdict
 
 import streamlit as st
 
@@ -43,6 +42,31 @@ st.set_page_config(page_title="Confluence Doc Assistant (Local)", layout="wide")
 st.title("Confluence Doc Assistant (Local, No LLM)")
 st.caption("BM25 + extractive assistant. Fully local. Follow-up questions can be scoped to last answer pages.")
 
+# UI CSS: scrollable chat, compact spacing
+st.markdown(
+    """
+<style>
+/* Scrollable chat history */
+.chat-scroll {
+    height: 65vh;
+    overflow-y: auto;
+    padding-right: 10px;
+    border: 1px solid rgba(250,250,250,0.08);
+    border-radius: 10px;
+    padding: 12px;
+}
+/* Small labels */
+.small-label {
+    font-size: 0.9rem;
+    opacity: 0.85;
+}
+/* Tighter headings */
+h3 { margin-bottom: 0.2rem; }
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
 
 # -----------------------------
 # Session State
@@ -68,12 +92,14 @@ if "pending_question" not in st.session_state:
 if "active_page_ids" not in st.session_state:
     st.session_state.active_page_ids = None  # None => global
 
-# Store last answer scope (for display/debug)
 if "last_answer_page_ids" not in st.session_state:
     st.session_state.last_answer_page_ids = []
 
 if "scope_mode" not in st.session_state:
     st.session_state.scope_mode = "Follow-up only (last answer pages)"
+
+if "editing_last" not in st.session_state:
+    st.session_state.editing_last = False
 
 
 # -----------------------------
@@ -114,7 +140,7 @@ def process_page_to_chunks(p, chunk_size, overlap):
                 "updated": p.get("updated", ""),
                 "url": p.get("url", ""),
                 "chunk": c,
-                "tokens": tokenize(c),  # Upgrade B
+                "tokens": tokenize(c),
             }
         )
     return out
@@ -125,7 +151,10 @@ def process_page_to_chunks(p, chunk_size, overlap):
 # -----------------------------
 def classify_question(q: str) -> str:
     s = q.strip().lower()
-    if any(s.startswith(x) for x in ["how do i", "how to", "how can", "steps", "procedure", "setup", "configure", "install"]):
+    if any(
+        s.startswith(x)
+        for x in ["how do i", "how to", "how can", "steps", "procedure", "setup", "configure", "install"]
+    ):
         return "howto"
     if any(s.startswith(x) for x in ["why", "root cause", "reason"]):
         return "why"
@@ -268,7 +297,9 @@ def build_assistant_reply_page_first(query: str, retrieved_chunks: list):
             lines.append(highlight_keywords(top_chunk[:350] + "...", query))
 
         if best_page.get("url"):
-            lines.append(f"<small>Primary source: <a href='{best_page['url']}' target='_blank'>{best_page['title']}</a></small>")
+            lines.append(
+                f"<small>Primary source: <a href='{best_page['url']}' target='_blank'>{best_page['title']}</a></small>"
+            )
 
     if best_page:
         if qtype == "howto":
@@ -333,164 +364,200 @@ if st.session_state.chunks_meta is None:
 
 
 # -----------------------------
-# Layout
+# Layout (make chat bigger)
 # -----------------------------
-col1, col2 = st.columns([1, 2])
+col1, col2 = st.columns([1, 3])
 
 
 # -----------------------------
-# Left panel: Sync / status
+# Left panel: compact status + sync expander at bottom
 # -----------------------------
 with col1:
-    st.subheader("Sync / Index")
-    st.write("Pull Confluence pages → chunk → tokenize → BM25 index (local).")
+    st.subheader("Index")
 
-    st.markdown("**Current CQL:**")
-    st.code(cfg.get("cql", ""), language="sql")
-
-    conf_user = st.text_input("Confluence user", key="conf_user")
-    conf_pass = st.text_input("Confluence password", type="password", key="conf_pass")
-
-    if st.button("Sync Now", disabled=st.session_state.syncing):
-        st.session_state.syncing = True
-        st.session_state.sync_msg = ""
-        st.rerun()
-
-    if st.session_state.syncing:
-        with st.spinner("Syncing Confluence and building index..."):
-            progress = st.progress(0)
-            status = st.empty()
-
-            if not conf_user or not conf_pass:
-                progress.progress(100)
-                st.session_state.sync_msg = "❌ Enter Confluence credentials."
-                st.session_state.syncing = False
-                st.rerun()
-
-            pages = sync_confluence(cfg, conf_user, conf_pass)
-
-            if not pages:
-                progress.progress(100)
-                st.session_state.sync_msg = "✅ No updated pages found. Index unchanged."
-                st.session_state.syncing = False
-                st.rerun()
-
-            total_pages = len(pages)
-            chunks_meta_new = []
-
-            max_workers = min(16, (os.cpu_count() or 4))
-            status.write(f"Parallel processing with {max_workers} workers...")
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
-                futures = {ex.submit(process_page_to_chunks, p, CHUNK_SIZE, OVERLAP): p for p in pages}
-
-                done = 0
-                for fut in concurrent.futures.as_completed(futures):
-                    p = futures[fut]
-                    try:
-                        page_chunks = fut.result()
-                        chunks_meta_new.extend(page_chunks)
-                    except Exception as e:
-                        status.write(f"⚠ Failed page: {p.get('title','')} — {e}")
-
-                    done += 1
-                    progress.progress(int(done / total_pages * 100))
-
-            existing = load_chunks() or []
-            changed_ids = {x["page_id"] for x in chunks_meta_new if x.get("page_id")}
-            existing = [x for x in existing if x.get("page_id") not in changed_ids]
-            combined = existing + chunks_meta_new
-
-            st.session_state.chunks_meta = combined
-            st.session_state.bm25 = build_bm25(combined)
-            save_chunks(combined)
-
-            progress.progress(100)
-            st.session_state.sync_msg = f"✅ Sync complete. Updated {len(changed_ids)} pages. Total chunks: {len(combined)}."
-            st.session_state.syncing = False
-            st.rerun()
+    if st.session_state.bm25 and st.session_state.chunks_meta:
+        st.success(f"Index loaded: {len(st.session_state.chunks_meta)} chunks")
+    else:
+        st.warning("No index loaded yet. Run initial sync.")
 
     if st.session_state.sync_msg:
         st.info(st.session_state.sync_msg)
 
-    st.markdown("### Index Status")
-    if st.session_state.bm25 and st.session_state.chunks_meta:
-        st.success(f"Index loaded: {len(st.session_state.chunks_meta)} chunks")
-    else:
-        st.warning("No index loaded yet.")
+    # Utility buttons
+    btn1, btn2 = st.columns(2)
+    with btn1:
+        if st.button("Clear Chat", use_container_width=True):
+            st.session_state.messages = []
+            st.session_state.pending_question = None
+            st.session_state.active_page_ids = None
+            st.session_state.last_answer_page_ids = []
+            st.session_state.editing_last = False
+            st.rerun()
+    with btn2:
+        if st.button("Reset Scope", use_container_width=True):
+            st.session_state.active_page_ids = None
+            st.session_state.last_answer_page_ids = []
+            st.rerun()
 
-    if st.button("Clear Cache"):
-        if os.path.exists(CHUNKS_PATH):
-            os.remove(CHUNKS_PATH)
-        st.session_state.chunks_meta = None
-        st.session_state.bm25 = None
-        st.session_state.sync_msg = "✅ Cache cleared. Sync again."
-        st.rerun()
+    # Sync / Reindex expander (bottom-ish)
+    with st.expander("Sync / Reindex (advanced)", expanded=not bool(st.session_state.bm25)):
+        st.write("Pull Confluence pages → chunk → tokenize → BM25 index (local).")
 
-    if st.button("Clear Chat"):
-        st.session_state.messages = []
-        st.session_state.pending_question = None
-        st.session_state.active_page_ids = None
-        st.session_state.last_answer_page_ids = []
-        st.rerun()
+        st.markdown("**Current CQL:**")
+        st.code(cfg.get("cql", ""), language="sql")
+
+        conf_user = st.text_input("Confluence user", key="conf_user")
+        conf_pass = st.text_input("Confluence password", type="password", key="conf_pass")
+
+        if st.button("Sync Now", disabled=st.session_state.syncing):
+            st.session_state.syncing = True
+            st.session_state.sync_msg = ""
+            st.rerun()
+
+        if st.session_state.syncing:
+            with st.spinner("Syncing Confluence and building index..."):
+                progress = st.progress(0)
+                status = st.empty()
+
+                if not conf_user or not conf_pass:
+                    progress.progress(100)
+                    st.session_state.sync_msg = "❌ Enter Confluence credentials."
+                    st.session_state.syncing = False
+                    st.rerun()
+
+                pages = sync_confluence(cfg, conf_user, conf_pass)
+
+                if not pages:
+                    progress.progress(100)
+                    st.session_state.sync_msg = "✅ No updated pages found. Index unchanged."
+                    st.session_state.syncing = False
+                    st.rerun()
+
+                total_pages = len(pages)
+                chunks_meta_new = []
+
+                max_workers = min(16, (os.cpu_count() or 4))
+                status.write(f"Parallel processing with {max_workers} workers...")
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+                    futures = {ex.submit(process_page_to_chunks, p, CHUNK_SIZE, OVERLAP): p for p in pages}
+
+                    done = 0
+                    for fut in concurrent.futures.as_completed(futures):
+                        p = futures[fut]
+                        try:
+                            page_chunks = fut.result()
+                            chunks_meta_new.extend(page_chunks)
+                        except Exception as e:
+                            status.write(f"⚠ Failed page: {p.get('title','')} — {e}")
+
+                        done += 1
+                        progress.progress(int(done / total_pages * 100))
+
+                existing = load_chunks() or []
+                changed_ids = {x["page_id"] for x in chunks_meta_new if x.get("page_id")}
+                existing = [x for x in existing if x.get("page_id") not in changed_ids]
+                combined = existing + chunks_meta_new
+
+                st.session_state.chunks_meta = combined
+                st.session_state.bm25 = build_bm25(combined)
+                save_chunks(combined)
+
+                progress.progress(100)
+                st.session_state.sync_msg = (
+                    f"✅ Sync complete. Updated {len(changed_ids)} pages. Total chunks: {len(combined)}."
+                )
+                st.session_state.syncing = False
+                st.rerun()
+
+        # Cache operations
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("Clear Cache", use_container_width=True):
+                if os.path.exists(CHUNKS_PATH):
+                    os.remove(CHUNKS_PATH)
+                st.session_state.chunks_meta = None
+                st.session_state.bm25 = None
+                st.session_state.sync_msg = "✅ Cache cleared. Sync again."
+                st.rerun()
+        with c2:
+            st.caption("Tip: initial sync can take time for large spaces.")
 
 
 # -----------------------------
-# Right panel: Chat assistant
+# Right panel: Chat + controls + scrollable chat history
 # -----------------------------
 with col2:
     st.subheader("Chat")
 
-    # --- Editable last question UI ---
-    st.markdown("### Edit last question")
-    last_user_idx = find_last_user_index(st.session_state.messages)
+    # Controls in an expander to keep chat clean
+    with st.expander("Controls (edit, scope)", expanded=True):
+        # ---- Edit last question (Edit button UX) ----
+        last_user_idx = find_last_user_index(st.session_state.messages)
 
-    if last_user_idx is None:
-        st.caption("No questions yet.")
-    else:
-        last_q = st.session_state.messages[last_user_idx]["content"]
-        edited_q = st.text_area("Last question", value=last_q, key="edit_last_question")
+        st.markdown("**Edit last question**")
+        if last_user_idx is None:
+            st.caption("No questions yet.")
+        else:
+            last_q = st.session_state.messages[last_user_idx]["content"]
 
-        c1, c2, c3 = st.columns([1, 1, 1])
-        with c1:
-            if st.button("Update & Regenerate"):
-                st.session_state.messages[last_user_idx]["content"] = edited_q
-                delete_messages_after(st.session_state.messages, last_user_idx)
-                st.session_state.pending_question = edited_q
-                st.rerun()
-        with c2:
-            if st.button("Cancel edit"):
-                st.session_state.edit_last_question = last_q
-        with c3:
-            if st.button("Reset scope to Global"):
-                st.session_state.active_page_ids = None
-                st.session_state.last_answer_page_ids = []
-                st.rerun()
+            r1, r2 = st.columns([5, 1])
+            with r1:
+                st.markdown(f"<div class='small-label'><b>Last question:</b> {last_q}</div>", unsafe_allow_html=True)
+            with r2:
+                if st.button("Edit", use_container_width=True):
+                    st.session_state.editing_last = True
 
-    # --- Scope mode control ---
-    st.markdown("### Conversation scope")
-    scope_mode = st.radio(
-        "Search scope",
-        ["Global (all docs)", "Follow-up only (last answer pages)"],
-        horizontal=True,
-        key="scope_mode_radio"
-    )
-    st.session_state.scope_mode = scope_mode
+            if st.session_state.editing_last:
+                edited_q = st.text_area("Edit", value=last_q, key="edit_last_question")
 
-    if st.session_state.active_page_ids:
-        st.caption(f"Scoped to {len(st.session_state.active_page_ids)} pages from last answer.")
-    else:
-        st.caption("Scoped to all indexed pages.")
+                b1, b2, b3 = st.columns([2, 2, 2])
+                with b1:
+                    if st.button("Update & Regenerate", use_container_width=True):
+                        st.session_state.messages[last_user_idx]["content"] = edited_q
+                        delete_messages_after(st.session_state.messages, last_user_idx)
+                        st.session_state.pending_question = edited_q
+                        st.session_state.editing_last = False
+                        st.rerun()
+                with b2:
+                    if st.button("Cancel edit", use_container_width=True):
+                        st.session_state.editing_last = False
+                        st.rerun()
+                with b3:
+                    if st.button("Reset scope to Global", use_container_width=True):
+                        st.session_state.active_page_ids = None
+                        st.session_state.last_answer_page_ids = []
+                        st.session_state.editing_last = False
+                        st.rerun()
 
-    # Render chat history
+        st.divider()
+
+        # ---- Conversation scope ----
+        st.markdown("**Conversation scope**")
+        scope_mode = st.radio(
+            "Search scope",
+            ["Global (all docs)", "Follow-up only (last answer pages)"],
+            horizontal=True,
+            key="scope_mode_radio",
+        )
+        st.session_state.scope_mode = scope_mode
+
+        if st.session_state.active_page_ids:
+            st.caption(f"Scoped to {len(st.session_state.active_page_ids)} pages from last answer.")
+        else:
+            st.caption("Scoped to all indexed pages.")
+
+    # ---- Scrollable chat history ----
+    st.markdown('<div class="chat-scroll">', unsafe_allow_html=True)
     for m in st.session_state.messages:
         with st.chat_message(m["role"]):
             if m["role"] == "assistant":
                 st.markdown(m["content"], unsafe_allow_html=True)
             else:
                 st.markdown(m["content"])
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    # Chat input
+    # ---- Chat input always at bottom ----
     prompt = st.chat_input("Ask about the docs…")
 
     # Decide what question to run: edited regen vs new input
@@ -503,37 +570,38 @@ with col2:
         prompt_to_run = None
 
     if prompt_to_run:
-        # Add user message if this is a fresh question (not already last message)
-        if not (st.session_state.messages and st.session_state.messages[-1]["role"] == "user" and st.session_state.messages[-1]["content"] == prompt_to_run):
+        # Add user message if it isn't already the last message
+        if not (
+            st.session_state.messages
+            and st.session_state.messages[-1]["role"] == "user"
+            and st.session_state.messages[-1]["content"] == prompt_to_run
+        ):
             st.session_state.messages.append({"role": "user", "content": prompt_to_run})
 
         if not st.session_state.bm25 or not st.session_state.chunks_meta:
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": "I don’t have an index yet. Please run **Sync Now** first."
-            })
+            st.session_state.messages.append(
+                {"role": "assistant", "content": "I don’t have an index yet. Please run **Sync Now** first."}
+            )
             st.rerun()
 
-        # Apply scope: next question can be limited to last answer pages
+        # Apply scope (follow-up only)
         chunks_for_search = st.session_state.chunks_meta
         if st.session_state.scope_mode.startswith("Follow-up") and st.session_state.active_page_ids:
             chunks_for_search = filter_chunks_by_page_ids(chunks_for_search, st.session_state.active_page_ids)
 
-        # Build a BM25 for this scope (fast if scope is small)
+        # Build scoped BM25 (fast for small scope)
         bm25_scoped = build_bm25(chunks_for_search)
 
         retrieved = search_bm25(
             prompt_to_run,
             bm25_scoped,
             chunks_for_search,
-            top_k=TOP_K
+            top_k=TOP_K,
         )
 
-        # Build assistant reply (page-first)
         assistant_text = build_assistant_reply_page_first(prompt_to_run, retrieved)
 
-        # Update scope based on this answer (top pages from retrieved results)
-        # Only if follow-up mode is selected
+        # Update scope from this answer (top 8 pages)
         new_scope = []
         seen = set()
         for r in retrieved[:25]:
@@ -547,7 +615,6 @@ with col2:
         st.session_state.last_answer_page_ids = new_scope
 
         if st.session_state.scope_mode.startswith("Follow-up"):
-            # Only update active scope if we actually found pages
             if new_scope:
                 st.session_state.active_page_ids = set(new_scope)
         else:

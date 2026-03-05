@@ -1,156 +1,55 @@
-import re
+import random
 
-def split_sentences(text: str):
+def get_with_retries(url, *, params, auth, headers, timeout, verify, max_retries=8):
     """
-    Simple sentence splitter without nltk.
-    Works decently for internal docs.
+    Retries on rate limiting (429) and transient errors (502/503/504).
+    Honors Retry-After if provided. Uses exponential backoff + jitter otherwise.
     """
-    if not text:
-        return []
-    text = re.sub(r"\s+", " ", text).strip()
-    # split on ., ?, ! followed by space/cap/number/[
-    parts = re.split(r"(?<=[.!?])\s+(?=[A-Z0-9\[])", text)
-    # fallback: if not splitting well, return whole text
-    return [p.strip() for p in parts if p.strip()]
+    attempt = 0
+    while True:
+        r = requests.get(
+            url,
+            params=params,
+            auth=auth,
+            headers=headers,
+            timeout=timeout,
+            verify=verify,
+        )
 
-def score_sentence(query_tokens, sent_tokens):
-    """
-    Fast lexical overlap score.
-    You can tune weights later.
-    """
-    if not sent_tokens:
-        return 0.0
-    q = set(query_tokens)
-    s = set(sent_tokens)
-    overlap = len(q & s)
-    if overlap == 0:
-        return 0.0
-    # normalize by query size so longer queries behave
-    return overlap / max(1, len(q))
+        # Success
+        if r.status_code < 400:
+            return r
 
-def build_sentence_answers(query: str, retrieved_chunks: list, max_sentences=6):
-    """
-    Takes BM25 top chunks and returns best sentences with citations.
-    """
-    q_tokens = tokenize(query)
+        # 400 is a real error (CQL etc.) -> do not retry
+        if r.status_code == 400:
+            raise RuntimeError(
+                f"400 from Confluence. CQL was:\n{params.get('cql')}\n\nResponse:\n{r.text[:800]}"
+            )
 
-    candidates = []
-    for r in retrieved_chunks:
-        chunk = r.get("chunk", "")
-        for sent in split_sentences(chunk):
-            stoks = tokenize(sent)
-            sc = score_sentence(q_tokens, stoks)
-            if sc <= 0:
-                continue
-            candidates.append({
-                "score": sc,
-                "sentence": sent,
-                "title": r.get("title", ""),
-                "url": r.get("url", ""),
-                "space": r.get("space", ""),
-                "updated": r.get("updated", "")
-            })
+        # Retry-able: rate limit / transient gateway issues
+        if r.status_code in (429, 502, 503, 504):
+            attempt += 1
+            if attempt > max_retries:
+                raise RuntimeError(
+                    f"Confluence request failed after {max_retries} retries "
+                    f"(last status={r.status_code}). Response:\n{r.text[:500]}"
+                )
 
-    # sort best-first; keep diverse-ish by not repeating identical sentences
-    candidates.sort(key=lambda x: x["score"], reverse=True)
+            retry_after = r.headers.get("Retry-After")
+            if retry_after:
+                # Retry-After can be seconds
+                try:
+                    sleep_s = int(retry_after)
+                except Exception:
+                    sleep_s = 5
+            else:
+                # Exponential backoff with jitter: 1,2,4,8,... capped
+                base = min(60, 2 ** (attempt - 1))
+                sleep_s = base + random.uniform(0, 1.5)
 
-    seen = set()
-    picked = []
-    for c in candidates:
-        key = c["sentence"][:120]
-        if key in seen:
+            print(f"[THROTTLE] status={r.status_code} attempt={attempt}/{max_retries} sleeping={sleep_s:.1f}s")
+            time.sleep(sleep_s)
             continue
-        seen.add(key)
-        picked.append(c)
-        if len(picked) >= max_sentences:
-            break
 
-    return picked
-
-
-
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-st.subheader("Chat")
-
-# Render chat history
-for m in st.session_state.messages:
-    with st.chat_message(m["role"]):
-        st.markdown(m["content"])
-
-# Chat input
-prompt = st.chat_input("Ask about the docs…")
-
-if prompt:
-    # User message
-    st.session_state.messages.append({"role": "user", "content": prompt})
-
-    # Assistant: retrieve
-    if not st.session_state.bm25 or not st.session_state.chunks_meta:
-        assistant_text = "I don’t have an index yet. Please run **Sync Now** first."
-        st.session_state.messages.append({"role": "assistant", "content": assistant_text})
-        st.rerun()
-
-    retrieved = search_bm25(
-        prompt,
-        st.session_state.bm25,
-        st.session_state.chunks_meta,
-        top_k=50
-    )
-
-    # Show only top N chunks used for sentence extraction
-    retrieved_top = retrieved[:12]
-
-    # Build sentence-level response
-    answers = build_sentence_answers(prompt, retrieved_top, max_sentences=6)
-
-    if not answers:
-        assistant_text = "I couldn’t find a clear answer in the indexed docs for that query. Try different keywords."
-    else:
-        # Build a grounded reply
-        lines = []
-        lines.append("Here’s what I found in the docs:\n")
-        for a in answers:
-            lines.append(f"- {a['sentence']}")
-
-        # Sources (unique by url/title)
-        sources = []
-        seen_urls = set()
-        for a in answers:
-            u = a.get("url") or ""
-            t = a.get("title") or "Source"
-            if u and u not in seen_urls:
-                seen_urls.add(u)
-                sources.append(f"- [{t}]({u})")
-
-        if sources:
-            lines.append("\n**Sources:**")
-            lines.extend(sources)
-
-        assistant_text = "\n".join(lines)
-
-    st.session_state.messages.append({"role": "assistant", "content": assistant_text})
-    st.rerun()
-
-
-
-
-
-
-# Optional: attach top supporting chunks at the bottom
-support_chunks = retrieved_top[:5]
-
-
-lines.append("\n<details><summary><b>Show supporting chunks</b></summary>\n")
-for r in support_chunks:
-    title = r.get("title","")
-    chunk = r.get("chunk","")[:600]
-    url = r.get("url","")
-    lines.append(f"\n**{title}**  \n{chunk}…  \n{url}\n")
-lines.append("\n</details>")
-
-
-
-
-
+        # Other errors: raise immediately
+        r.raise_for_status()

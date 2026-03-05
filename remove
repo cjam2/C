@@ -1,435 +1,101 @@
-import os
-import json
-import re
-from collections import defaultdict
-import concurrent.futures
-
-import streamlit as st
-
-from sync_confluence import sync_confluence
-from chunking import html_to_text, chunk_words
-from indexer import build_bm25, search_bm25, tokenize
-
-
-# -----------------------------
-# Config Loading
-# -----------------------------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
-
-if not os.path.exists(CONFIG_PATH):
-    raise FileNotFoundError(f"config.json not found at {CONFIG_PATH}")
-
-with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-    cfg = json.load(f)
-
-DATA_DIR = cfg.get("data_dir", "./data")
-if not os.path.isabs(DATA_DIR):
-    DATA_DIR = os.path.join(BASE_DIR, DATA_DIR)
-os.makedirs(DATA_DIR, exist_ok=True)
-
-CHUNKS_PATH = os.path.join(DATA_DIR, "chunks_meta.jsonl")
-
-CHUNK_SIZE = int(cfg.get("chunk_words", 250))
-OVERLAP = int(cfg.get("chunk_overlap", 50))
-TOP_K = int(cfg.get("top_k", 50))
-
-# -----------------------------
-# Streamlit Setup
-# -----------------------------
-st.set_page_config(page_title="Confluence Doc Assistant (Local)", layout="wide")
-st.title("Confluence Doc Assistant (Local, No LLM)")
-st.caption("Fully local BM25 + extractive assistant (fusion, highlighting, summarization, classification).")
-
-# -----------------------------
-# Session State
-# -----------------------------
-if "chunks_meta" not in st.session_state:
-    st.session_state.chunks_meta = None
-
-if "bm25" not in st.session_state:
-    st.session_state.bm25 = None
-
-if "syncing" not in st.session_state:
-    st.session_state.syncing = False
-
-if "sync_msg" not in st.session_state:
-    st.session_state.sync_msg = ""
-
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-# -----------------------------
-# Cache Helpers
-# -----------------------------
-def save_chunks(chunks_meta):
-    with open(CHUNKS_PATH, "w", encoding="utf-8") as f:
-        for item in chunks_meta:
-            f.write(json.dumps(item, ensure_ascii=False) + "\n")
-
-def load_chunks():
-    if not os.path.exists(CHUNKS_PATH):
-        return None
-    chunks = []
-    with open(CHUNKS_PATH, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                chunks.append(json.loads(line))
-    return chunks
-
-# -----------------------------
-# Parallel Page Processing (Upgrade C) + Token caching (Upgrade B)
-# -----------------------------
-def process_page_to_chunks(p, chunk_size, overlap):
-    text = html_to_text(p.get("html", ""))
-    chunks = chunk_words(text, chunk_size=chunk_size, overlap=overlap)
-
-    out = []
-    for c in chunks:
-        out.append({
-            "page_id": p.get("id", ""),
-            "title": p.get("title", ""),
-            "space": p.get("space", ""),
-            "updated": p.get("updated", ""),
-            "url": p.get("url", ""),
-            "chunk": c,
-            "tokens": tokenize(c)
-        })
-    return out
-
-# -----------------------------
-# Extractive "AI-like" helpers
-# -----------------------------
-def classify_question(q: str) -> str:
-    s = q.strip().lower()
-    if any(s.startswith(x) for x in ["how do i", "how to", "how can", "steps", "procedure", "setup", "configure", "install"]):
-        return "howto"
-    if any(s.startswith(x) for x in ["why", "root cause", "reason"]):
-        return "why"
-    if any(s.startswith(x) for x in ["what is", "what are", "define", "meaning", "explain"]):
-        return "definition"
-    if any(s.startswith(x) for x in ["where", "which page", "which doc", "link", "url"]):
-        return "where"
-    if any(s.startswith(x) for x in ["when", "date", "timeline", "deadline"]):
-        return "when"
-    if any(x in s for x in ["error", "failed", "failure", "exception", "stack trace", "429", "401", "timeout"]):
-        return "troubleshoot"
-    return "general"
-
-def split_sentences(text: str):
-    if not text:
-        return []
-    text = re.sub(r"\s+", " ", text).strip()
-    parts = re.split(r"(?<=[.!?])\s+(?=[A-Z0-9\[])", text)
-    return [p.strip() for p in parts if p.strip()]
-
-def score_overlap(query_tokens, sent_tokens):
-    if not sent_tokens:
-        return 0.0
-    q = set(query_tokens)
-    s = set(sent_tokens)
-    ov = len(q & s)
-    if ov == 0:
-        return 0.0
-    return ov / max(1, len(q))
-
-def highlight_keywords(text: str, query: str):
-    if not text:
-        return ""
-    tokens = [t for t in tokenize(query) if len(t) >= 3]
-    if not tokens:
-        return text
-
-    tokens = sorted(set(tokens), key=len, reverse=True)
-
-    def repl(match):
-        return f"<mark>{match.group(0)}</mark>"
-
-    out = text
-    for tok in tokens[:12]:
-        out = re.sub(rf"(?i)\b{re.escape(tok)}\b", repl, out)
-    return out
-
-def extract_top_sentences_from_chunks(query: str, retrieved_chunks: list, max_candidates=80):
-    q_tokens = tokenize(query)
-    candidates = []
-
-    for r in retrieved_chunks:
-        chunk = r.get("chunk", "")
-        for sent in split_sentences(chunk):
-            sc = score_overlap(q_tokens, tokenize(sent))
-            if sc <= 0:
-                continue
-            candidates.append({
-                "score": sc,
-                "sentence": sent,
-                "title": r.get("title", ""),
-                "url": r.get("url", ""),
-                "space": r.get("space", ""),
-                "updated": r.get("updated", "")
-            })
-
-    candidates.sort(key=lambda x: x["score"], reverse=True)
-    return candidates[:max_candidates]
-
-def fuse_sentences(candidates, max_groups=5, max_sentences_per_group=3):
-    by_page = defaultdict(list)
-    for c in candidates:
-        key = (c.get("url", ""), c.get("title", ""))
-        by_page[key].append(c)
-
-    fused = []
-    for (url, title), sents in by_page.items():
-        sents.sort(key=lambda x: x["score"], reverse=True)
-        chosen = sents[:max_sentences_per_group]
-
-        seen = set()
-        cleaned = []
-        for x in chosen:
-            k = x["sentence"][:80]
-            if k in seen:
-                continue
-            seen.add(k)
-            cleaned.append(x["sentence"])
-
-        if cleaned:
-            fused.append({
-                "title": title,
-                "url": url,
-                "score": sents[0]["score"],
-                "text": " ".join(cleaned)
-            })
-
-    fused.sort(key=lambda x: x["score"], reverse=True)
-    return fused[:max_groups]
-
-def page_summaries(query: str, retrieved_chunks: list, top_pages=5, sentences_per_page=2):
-    candidates = extract_top_sentences_from_chunks(query, retrieved_chunks, max_candidates=200)
-
-    by_page = defaultdict(list)
-    for c in candidates:
-        by_page[(c.get("url", ""), c.get("title", ""))].append(c)
-
-    summaries = []
-    for (url, title), sents in by_page.items():
-        sents.sort(key=lambda x: x["score"], reverse=True)
-        picked = [x["sentence"] for x in sents[:sentences_per_page]]
-        if picked:
-            summaries.append({
-                "title": title,
-                "url": url,
-                "score": sents[0]["score"],
-                "summary": " ".join(picked)
-            })
-
-    summaries.sort(key=lambda x: x["score"], reverse=True)
-    return summaries[:top_pages]
-
-
-# -----------------------------
-# Auto load cached index on startup
-# -----------------------------
-if st.session_state.chunks_meta is None:
-    cached = load_chunks()
-    if cached:
-        st.session_state.chunks_meta = cached
-        st.session_state.bm25 = build_bm25(cached)
-
-
-# -----------------------------
-# Layout
-# -----------------------------
-col1, col2 = st.columns([1, 2])
-
-
-# -----------------------------
-# Left panel: Sync / status
-# -----------------------------
-with col1:
-    st.subheader("Sync / Index")
-    st.write("Pull Confluence pages (CQL) → chunk → tokenize → BM25 index (local).")
-
-    st.markdown("**Current CQL:**")
-    st.code(cfg.get("cql", ""), language="sql")
-
-    conf_user = st.text_input("Confluence user", key="conf_user")
-    conf_pass = st.text_input("Confluence password", type="password", key="conf_pass")
-
-    if st.button("Sync Now", disabled=st.session_state.syncing):
-        st.session_state.syncing = True
-        st.session_state.sync_msg = ""
-        st.rerun()
-
-    if st.session_state.syncing:
-        with st.spinner("Syncing Confluence and building index..."):
-            progress = st.progress(0)
-            status = st.empty()
-
-            if not conf_user or not conf_pass:
-                progress.progress(100)
-                st.session_state.sync_msg = "❌ Enter Confluence credentials."
-                st.session_state.syncing = False
-                st.rerun()
-
-            pages = sync_confluence(cfg, conf_user, conf_pass)
-
-            if not pages:
-                progress.progress(100)
-                st.session_state.sync_msg = "✅ No updated pages found. Index unchanged."
-                st.session_state.syncing = False
-                st.rerun()
-
-            total_pages = len(pages)
-            chunks_meta_new = []
-
-            max_workers = min(16, (os.cpu_count() or 4))
-            status.write(f"Parallel processing with {max_workers} workers...")
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
-                futures = {
-                    ex.submit(process_page_to_chunks, p, CHUNK_SIZE, OVERLAP): p
-                    for p in pages
-                }
-
-                done_count = 0
-                for fut in concurrent.futures.as_completed(futures):
-                    p = futures[fut]
-                    try:
-                        page_chunks = fut.result()
-                        chunks_meta_new.extend(page_chunks)
-                    except Exception as e:
-                        status.write(f"⚠ Failed page: {p.get('title','')} — {e}")
-
-                    done_count += 1
-                    progress.progress(int(done_count / total_pages * 100))
-
-            existing = load_chunks() or []
-            changed_ids = {x["page_id"] for x in chunks_meta_new if x.get("page_id")}
-            existing = [x for x in existing if x.get("page_id") not in changed_ids]
-            combined = existing + chunks_meta_new
-
-            bm25 = build_bm25(combined)
-            st.session_state.chunks_meta = combined
-            st.session_state.bm25 = bm25
-
-            save_chunks(combined)
-
-            progress.progress(100)
-            st.session_state.sync_msg = f"✅ Sync complete. Updated {len(changed_ids)} pages. Total chunks: {len(combined)}."
-            st.session_state.syncing = False
-            st.rerun()
-
-    if st.session_state.sync_msg:
-        st.info(st.session_state.sync_msg)
-
-    st.markdown("### Index Status")
-    if st.session_state.bm25 and st.session_state.chunks_meta:
-        st.success(f"Index loaded: {len(st.session_state.chunks_meta)} chunks")
-    else:
-        st.warning("No index loaded yet.")
-
-    if st.button("Clear Cache"):
-        if os.path.exists(CHUNKS_PATH):
-            os.remove(CHUNKS_PATH)
-        st.session_state.chunks_meta = None
-        st.session_state.bm25 = None
-        st.session_state.sync_msg = "✅ Cache cleared. Sync again."
-        st.rerun()
-
-    if st.button("Clear Chat"):
-        st.session_state.messages = []
-        st.rerun()
-
-
-# -----------------------------
-# Right panel: Chat assistant
-# -----------------------------
-with col2:
-    st.subheader("Chat")
-
-    # Render chat history
-    for m in st.session_state.messages:
-        with st.chat_message(m["role"]):
-            # Use HTML so <mark> highlighting renders for assistant replies
-            if m["role"] == "assistant":
-                st.markdown(m["content"], unsafe_allow_html=True)
-            else:
-                st.markdown(m["content"])
-
-    prompt = st.chat_input("Ask about the docs…")
-
-    if prompt:
-        st.session_state.messages.append({"role": "user", "content": prompt})
-
-        if not st.session_state.bm25 or not st.session_state.chunks_meta:
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": "I don’t have an index yet. Please run **Sync Now** first."
-            })
-            st.rerun()
-
-        retrieved = search_bm25(
-            prompt,
-            st.session_state.bm25,
-            st.session_state.chunks_meta,
-            top_k=TOP_K
+def build_assistant_reply(query: str, retrieved_top: list):
+    qtype = classify_question(query)
+
+    # Sentence candidates + fusion
+    cands = extract_top_sentences_from_chunks(query, retrieved_top, max_candidates=120)
+    fused = fuse_sentences(cands, max_groups=6, max_sentences_per_group=3)
+    summaries = page_summaries(query, retrieved_top, top_pages=6, sentences_per_page=2)
+
+    if not fused and not summaries:
+        return (
+            "I couldn’t find a strong match in the indexed docs for that. "
+            "Try different keywords (e.g., component name, environment name, error code)."
         )
 
-        retrieved_top = retrieved[:15]
-        qtype = classify_question(prompt)
+    # Make a short “direct answer”
+    direct_bits = []
+    for item in fused[:2]:
+        direct_bits.append(item["text"])
+    direct_answer = " ".join(direct_bits).strip()
+    direct_answer = highlight_keywords(direct_answer, query)
 
-        # Build extractive answer
-        cands = extract_top_sentences_from_chunks(prompt, retrieved_top, max_candidates=80)
-        fused = fuse_sentences(cands, max_groups=5, max_sentences_per_group=3)
-        summaries = page_summaries(prompt, retrieved_top, top_pages=5, sentences_per_page=2)
+    lines = []
+    lines.append(f"**Answer (from the docs):**  \n{direct_answer}\n")
 
-        lines = []
-        if qtype == "howto":
-            lines.append("**Suggested steps from the docs:**")
-        elif qtype == "troubleshoot":
-            lines.append("**Possible causes / fixes from the docs:**")
-        elif qtype == "definition":
-            lines.append("**Definition / explanation from the docs:**")
-        else:
-            lines.append("**What I found in the docs:**")
+    # Style based on question type
+    if qtype == "howto":
+        lines.append("**Suggested steps:**")
+        # Turn fused items into numbered steps
+        step_no = 1
+        for item in fused:
+            txt = highlight_keywords(item["text"], query)
+            # Keep steps short
+            txt = txt[:300] + ("…" if len(txt) > 300 else "")
+            if item.get("url") and item.get("title"):
+                lines.append(f"{step_no}. {txt}  \n   <small>Source: <a href='{item['url']}' target='_blank'>{item['title']}</a></small>")
+            else:
+                lines.append(f"{step_no}. {txt}")
+            step_no += 1
+            if step_no > 6:
+                break
 
-        if not fused:
-            lines.append("I couldn’t find a strong sentence-level match. Try different keywords.")
-        else:
-            for item in fused:
-                txt = highlight_keywords(item["text"], prompt)
-                # Add source link per fused bullet if present
-                if item.get("url") and item.get("title"):
-                    lines.append(f"- {txt}  \n  <small>Source: <a href='{item['url']}' target='_blank'>{item['title']}</a></small>")
-                else:
-                    lines.append(f"- {txt}")
+    elif qtype == "troubleshoot":
+        lines.append("**Likely causes / fixes (from the docs):**")
+        for item in fused[:6]:
+            txt = highlight_keywords(item["text"], query)
+            if item.get("url") and item.get("title"):
+                lines.append(f"- {txt}  \n  <small>Source: <a href='{item['url']}' target='_blank'>{item['title']}</a></small>")
+            else:
+                lines.append(f"- {txt}")
 
-        if summaries:
-            lines.append("<br><br><b>Top pages (quick summaries):</b>")
-            for s in summaries:
-                sm = highlight_keywords(s["summary"], prompt)
-                if s.get("url"):
-                    lines.append(f"- <a href='{s['url']}' target='_blank'>{s['title']}</a>: {sm}")
-                else:
-                    lines.append(f"- {s['title']}: {sm}")
+    elif qtype == "definition":
+        lines.append("**Definition / explanation:**")
+        for item in fused[:5]:
+            txt = highlight_keywords(item["text"], query)
+            if item.get("url") and item.get("title"):
+                lines.append(f"- {txt}  \n  <small>Source: <a href='{item['url']}' target='_blank'>{item['title']}</a></small>")
+            else:
+                lines.append(f"- {txt}")
 
-        # Optional: show supporting chunks in a compact list
-        if retrieved_top:
-            lines.append("<br><br><b>Supporting excerpts:</b>")
-            for r in retrieved_top[:5]:
-                title = r.get("title", "Source")
-                url = r.get("url", "")
-                chunk = highlight_keywords((r.get("chunk", "")[:350] + "..."), prompt)
-                if url:
-                    lines.append(f"- <a href='{url}' target='_blank'>{title}</a>: {chunk}")
-                else:
-                    lines.append(f"- {title}: {chunk}")
+    else:
+        lines.append("**Key points:**")
+        for item in fused[:6]:
+            txt = highlight_keywords(item["text"], query)
+            if item.get("url") and item.get("title"):
+                lines.append(f"- {txt}  \n  <small>Source: <a href='{item['url']}' target='_blank'>{item['title']}</a></small>")
+            else:
+                lines.append(f"- {txt}")
 
-        assistant_text = "\n".join(lines)
+    # Navigation section
+    if summaries:
+        lines.append("\n**Best matching pages:**")
+        for s in summaries[:6]:
+            sm = highlight_keywords(s["summary"], query)
+            if s.get("url"):
+                lines.append(f"- <a href='{s['url']}' target='_blank'>{s['title']}</a>: {sm}")
+            else:
+                lines.append(f"- {s['title']}: {sm}")
 
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": assistant_text
-        })
-        st.rerun()
+    # A small assistant-like follow-up prompt (no LLM, just helpful)
+    if qtype in ("howto", "troubleshoot"):
+        lines.append("\n**Quick follow-up:**")
+        lines.append("- Which environment is this for (SIT/UAT/Prod) and what’s the exact error text?")
+
+    return "\n".join(lines)
+
+
+
+
+
+
+retrieved_top = retrieved[:15]
+assistant_text = build_assistant_reply(prompt, retrieved_top)
+
+
+
+
+
+st.session_state.messages.append({"role": "assistant", "content": assistant_text})
+st.rerun()
+
+

@@ -1,9 +1,151 @@
-with col2:
-    st.subheader("Chat")
+def find_last_user_index(messages):
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i]["role"] == "user":
+            return i
+    return None
 
-    # Assistant mode selector
-    st.session_state.assistant_mode = st.radio(
-        "Assistant mode",
-        ["Page-first (recommended)", "Chunk-first"],
-        horizontal=True
-    )
+def delete_messages_after(messages, idx):
+    # keep messages up to idx (inclusive)
+    del messages[idx+1:]
+
+
+
+
+
+
+
+st.markdown("### Edit last question")
+
+last_user_idx = find_last_user_index(st.session_state.messages)
+
+if last_user_idx is None:
+    st.caption("No questions yet.")
+else:
+    last_q = st.session_state.messages[last_user_idx]["content"]
+    edited_q = st.text_area("Last question", value=last_q, key="edit_last_question")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Update & Regenerate"):
+            # Replace last user message
+            st.session_state.messages[last_user_idx]["content"] = edited_q
+
+            # Delete everything after that question (old assistant reply etc.)
+            delete_messages_after(st.session_state.messages, last_user_idx)
+
+            # Mark that we should re-run an answer for this edited question
+            st.session_state.pending_question = edited_q
+            st.rerun()
+
+    with c2:
+        if st.button("Cancel edit"):
+            st.session_state.edit_last_question = last_q
+
+
+
+if "active_page_ids" not in st.session_state:
+    st.session_state.active_page_ids = None  # None means global search
+
+if "pending_question" not in st.session_state:
+    st.session_state.pending_question = None
+
+
+
+
+
+
+
+
+st.markdown("### Conversation scope")
+
+scope_mode = st.radio(
+    "Search scope",
+    ["Global (all docs)", "Follow-up only (last answer pages)"],
+    horizontal=True
+)
+
+if scope_mode.startswith("Global"):
+    st.session_state.active_page_ids = None
+
+if st.session_state.active_page_ids:
+    st.caption(f"Scoped to {len(st.session_state.active_page_ids)} pages from last answer.")
+else:
+    st.caption("Scoped to all indexed pages.")
+
+
+
+
+
+
+
+
+def filter_chunks_by_page_ids(chunks_meta, page_ids_set):
+    if not page_ids_set:
+        return chunks_meta
+    return [c for c in chunks_meta if c.get("page_id") in page_ids_set]
+
+
+
+
+
+# Pick the page_ids from top results (unique)
+new_scope = []
+seen = set()
+for r in retrieved[:20]:
+    pid = r.get("page_id")
+    if pid and pid not in seen:
+        seen.add(pid)
+        new_scope.append(pid)
+    if len(new_scope) >= 8:
+        break
+
+# Update scope only if in follow-up mode
+if scope_mode.startswith("Follow-up"):
+    st.session_state.active_page_ids = set(new_scope)
+
+
+
+
+
+chunks_for_search = st.session_state.chunks_meta
+if scope_mode.startswith("Follow-up") and st.session_state.active_page_ids:
+    chunks_for_search = filter_chunks_by_page_ids(chunks_for_search, st.session_state.active_page_ids)
+
+# Build a BM25 for scoped chunks (fast enough for small scope)
+bm25_scoped = build_bm25(chunks_for_search)
+
+retrieved = search_bm25(
+    prompt,
+    bm25_scoped,
+    chunks_for_search,
+    top_k=60
+)
+
+
+
+prompt = st.chat_input("Ask about the docs…")
+
+# If we edited a question and want to regenerate
+if st.session_state.pending_question:
+    prompt_to_run = st.session_state.pending_question
+    st.session_state.pending_question = None
+elif prompt:
+    prompt_to_run = prompt
+else:
+    prompt_to_run = None
+
+if prompt_to_run:
+    # If it came from chat_input, add user message
+    if not (st.session_state.messages and st.session_state.messages[-1]["role"] == "user" and st.session_state.messages[-1]["content"] == prompt_to_run):
+        st.session_state.messages.append({"role": "user", "content": prompt_to_run})
+
+    # ... run retrieval + build answer ...
+
+
+
+
+
+
+if st.button("Reset scope to Global"):
+    st.session_state.active_page_ids = None
+    st.rerun()

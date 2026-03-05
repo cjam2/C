@@ -1,82 +1,308 @@
-def find_last_user_index(messages):
-    for i in range(len(messages) - 1, -1, -1):
-        if messages[i]["role"] == "user":
-            return i
-    return None
+import os
+import json
+import re
+import time
+from collections import defaultdict
+import concurrent.futures
 
-def delete_messages_after(messages, idx):
-    # keep messages up to idx (inclusive)
-    del messages[idx+1:]
+import streamlit as st
 
-
-
-
-
+from sync_confluence import sync_confluence
+from chunking import html_to_text, chunk_words
+from indexer import build_bm25, search_bm25, tokenize
 
 
-st.markdown("### Edit last question")
+# -----------------------------
+# Config Loading
+# -----------------------------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 
-last_user_idx = find_last_user_index(st.session_state.messages)
+if not os.path.exists(CONFIG_PATH):
+    raise FileNotFoundError(f"config.json not found at {CONFIG_PATH}")
 
-if last_user_idx is None:
-    st.caption("No questions yet.")
-else:
-    last_q = st.session_state.messages[last_user_idx]["content"]
-    edited_q = st.text_area("Last question", value=last_q, key="edit_last_question")
+with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+    cfg = json.load(f)
 
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("Update & Regenerate"):
-            # Replace last user message
-            st.session_state.messages[last_user_idx]["content"] = edited_q
+DATA_DIR = cfg.get("data_dir", "./data")
+if not os.path.isabs(DATA_DIR):
+    DATA_DIR = os.path.join(BASE_DIR, DATA_DIR)
+os.makedirs(DATA_DIR, exist_ok=True)
 
-            # Delete everything after that question (old assistant reply etc.)
-            delete_messages_after(st.session_state.messages, last_user_idx)
+CHUNKS_PATH = os.path.join(DATA_DIR, "chunks_meta.jsonl")
 
-            # Mark that we should re-run an answer for this edited question
-            st.session_state.pending_question = edited_q
-            st.rerun()
-
-    with c2:
-        if st.button("Cancel edit"):
-            st.session_state.edit_last_question = last_q
+CHUNK_SIZE = int(cfg.get("chunk_words", 250))
+OVERLAP = int(cfg.get("chunk_overlap", 50))
+TOP_K = int(cfg.get("top_k", 60))  # retrieval breadth
 
 
+# -----------------------------
+# Streamlit Setup
+# -----------------------------
+st.set_page_config(page_title="Confluence Doc Assistant (Local)", layout="wide")
+st.title("Confluence Doc Assistant (Local, No LLM)")
+st.caption("BM25 + extractive assistant. Fully local. Follow-up questions can be scoped to last answer pages.")
 
-if "active_page_ids" not in st.session_state:
-    st.session_state.active_page_ids = None  # None means global search
 
+# -----------------------------
+# Session State
+# -----------------------------
+if "chunks_meta" not in st.session_state:
+    st.session_state.chunks_meta = None
+if "bm25" not in st.session_state:
+    st.session_state.bm25 = None
+
+if "syncing" not in st.session_state:
+    st.session_state.syncing = False
+if "sync_msg" not in st.session_state:
+    st.session_state.sync_msg = ""
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# Editable chat + scoped follow-ups
 if "pending_question" not in st.session_state:
     st.session_state.pending_question = None
 
+# When enabled, follow-up questions search only these page_ids
+if "active_page_ids" not in st.session_state:
+    st.session_state.active_page_ids = None  # None => global
+
+# Store last answer scope (for display/debug)
+if "last_answer_page_ids" not in st.session_state:
+    st.session_state.last_answer_page_ids = []
+
+if "scope_mode" not in st.session_state:
+    st.session_state.scope_mode = "Follow-up only (last answer pages)"
 
 
+# -----------------------------
+# Cache Helpers
+# -----------------------------
+def save_chunks(chunks_meta):
+    with open(CHUNKS_PATH, "w", encoding="utf-8") as f:
+        for item in chunks_meta:
+            f.write(json.dumps(item, ensure_ascii=False) + "\n")
 
 
+def load_chunks():
+    if not os.path.exists(CHUNKS_PATH):
+        return None
+    chunks = []
+    with open(CHUNKS_PATH, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                chunks.append(json.loads(line))
+    return chunks
 
 
+# -----------------------------
+# Parallel Page Processing + Token caching
+# -----------------------------
+def process_page_to_chunks(p, chunk_size, overlap):
+    text = html_to_text(p.get("html", ""))
+    chunks = chunk_words(text, chunk_size=chunk_size, overlap=overlap)
 
-st.markdown("### Conversation scope")
-
-scope_mode = st.radio(
-    "Search scope",
-    ["Global (all docs)", "Follow-up only (last answer pages)"],
-    horizontal=True
-)
-
-if scope_mode.startswith("Global"):
-    st.session_state.active_page_ids = None
-
-if st.session_state.active_page_ids:
-    st.caption(f"Scoped to {len(st.session_state.active_page_ids)} pages from last answer.")
-else:
-    st.caption("Scoped to all indexed pages.")
-
+    out = []
+    for c in chunks:
+        out.append(
+            {
+                "page_id": p.get("id", ""),
+                "title": p.get("title", ""),
+                "space": p.get("space", ""),
+                "updated": p.get("updated", ""),
+                "url": p.get("url", ""),
+                "chunk": c,
+                "tokens": tokenize(c),  # Upgrade B
+            }
+        )
+    return out
 
 
+# -----------------------------
+# Extractive assistant helpers
+# -----------------------------
+def classify_question(q: str) -> str:
+    s = q.strip().lower()
+    if any(s.startswith(x) for x in ["how do i", "how to", "how can", "steps", "procedure", "setup", "configure", "install"]):
+        return "howto"
+    if any(s.startswith(x) for x in ["why", "root cause", "reason"]):
+        return "why"
+    if any(s.startswith(x) for x in ["what is", "what are", "define", "meaning", "explain"]):
+        return "definition"
+    if any(s.startswith(x) for x in ["where", "which page", "which doc", "link", "url"]):
+        return "where"
+    if any(s.startswith(x) for x in ["when", "date", "timeline", "deadline"]):
+        return "when"
+    if any(x in s for x in ["error", "failed", "failure", "exception", "stack trace", "429", "401", "timeout"]):
+        return "troubleshoot"
+    return "general"
 
 
+def split_sentences(text: str):
+    if not text:
+        return []
+    text = re.sub(r"\s+", " ", text).strip()
+    parts = re.split(r"(?<=[.!?])\s+(?=[A-Z0-9\[])", text)
+    return [p.strip() for p in parts if p.strip()]
 
+
+def score_overlap(query_tokens, sent_tokens):
+    if not sent_tokens:
+        return 0.0
+    q = set(query_tokens)
+    s = set(sent_tokens)
+    ov = len(q & s)
+    if ov == 0:
+        return 0.0
+    return ov / max(1, len(q))
+
+
+def highlight_keywords(text: str, query: str):
+    if not text:
+        return ""
+    tokens = [t for t in tokenize(query) if len(t) >= 3]
+    if not tokens:
+        return text
+
+    tokens = sorted(set(tokens), key=len, reverse=True)
+
+    def repl(match):
+        return f"<mark>{match.group(0)}</mark>"
+
+    out = text
+    for tok in tokens[:12]:
+        out = re.sub(rf"(?i)\b{re.escape(tok)}\b", repl, out)
+    return out
+
+
+def extract_top_sentences_from_chunks(query: str, retrieved_chunks: list, max_candidates=120):
+    q_tokens = tokenize(query)
+    candidates = []
+    for r in retrieved_chunks:
+        chunk = r.get("chunk", "")
+        for sent in split_sentences(chunk):
+            sc = score_overlap(q_tokens, tokenize(sent))
+            if sc <= 0:
+                continue
+            candidates.append(
+                {
+                    "score": sc,
+                    "sentence": sent,
+                    "title": r.get("title", ""),
+                    "url": r.get("url", ""),
+                    "page_id": r.get("page_id", ""),
+                    "space": r.get("space", ""),
+                    "updated": r.get("updated", ""),
+                }
+            )
+
+    candidates.sort(key=lambda x: x["score"], reverse=True)
+    return candidates[:max_candidates]
+
+
+def page_key(r):
+    return (r.get("page_id", ""), r.get("url", ""), r.get("title", ""))
+
+
+def aggregate_by_page(retrieved_chunks):
+    pages = {}
+    for r in retrieved_chunks:
+        k = page_key(r)
+        if k not in pages:
+            pages[k] = {
+                "page_id": r.get("page_id", ""),
+                "url": r.get("url", ""),
+                "title": r.get("title", ""),
+                "space": r.get("space", ""),
+                "updated": r.get("updated", ""),
+                "chunks": [],
+                "score": 0.0,
+            }
+        pages[k]["chunks"].append(r)
+
+    for _, p in pages.items():
+        scores = sorted([float(x.get("score", 0.0) or 0.0) for x in p["chunks"]], reverse=True)
+        p["score"] = sum(scores[:4])  # top-4 chunk sum
+        p["chunks"].sort(key=lambda x: float(x.get("score", 0.0) or 0.0), reverse=True)
+
+    ranked = sorted(pages.values(), key=lambda x: x["score"], reverse=True)
+    return ranked
+
+
+def best_quotes_for_page(query: str, page_obj: dict, max_quotes=3):
+    cands = extract_top_sentences_from_chunks(query, page_obj["chunks"][:8], max_candidates=250)
+    quotes = []
+    seen = set()
+    for c in cands:
+        s = c["sentence"]
+        k = s[:90]
+        if k in seen:
+            continue
+        seen.add(k)
+        quotes.append(s)
+        if len(quotes) >= max_quotes:
+            break
+    return quotes
+
+
+def build_assistant_reply_page_first(query: str, retrieved_chunks: list):
+    qtype = classify_question(query)
+    if not retrieved_chunks:
+        return "I couldn’t find matches in the indexed docs. Try different keywords or broaden the CQL."
+
+    ranked_pages = aggregate_by_page(retrieved_chunks)
+    best_page = ranked_pages[0] if ranked_pages else None
+
+    lines = []
+    lines.append("**Answer (grounded in docs):**")
+
+    if best_page:
+        quotes = best_quotes_for_page(query, best_page, max_quotes=3)
+        if quotes:
+            direct = " ".join(quotes[:2])
+            lines.append(highlight_keywords(direct, query))
+        else:
+            top_chunk = best_page["chunks"][0].get("chunk", "")
+            lines.append(highlight_keywords(top_chunk[:350] + "...", query))
+
+        if best_page.get("url"):
+            lines.append(f"<small>Primary source: <a href='{best_page['url']}' target='_blank'>{best_page['title']}</a></small>")
+
+    if best_page:
+        if qtype == "howto":
+            lines.append("\n**Suggested steps (extracted):**")
+            steps = best_quotes_for_page(query, best_page, max_quotes=6)
+            for i, s in enumerate(steps, 1):
+                lines.append(f"{i}. {highlight_keywords(s, query)}")
+        elif qtype == "troubleshoot":
+            lines.append("\n**Likely causes / fixes (extracted):**")
+            items = best_quotes_for_page(query, best_page, max_quotes=6)
+            for s in items:
+                lines.append(f"- {highlight_keywords(s, query)}")
+        else:
+            lines.append("\n**Key points (extracted):**")
+            items = best_quotes_for_page(query, best_page, max_quotes=5)
+            for s in items:
+                lines.append(f"- {highlight_keywords(s, query)}")
+
+    lines.append("\n**Top pages to check:**")
+    for p in ranked_pages[:6]:
+        quotes = best_quotes_for_page(query, p, max_quotes=2)
+        summary = " ".join(quotes) if quotes else (p["chunks"][0].get("chunk", "")[:220] + "…")
+        summary = highlight_keywords(summary, query)
+
+        if p.get("url"):
+            lines.append(f"- <a href='{p['url']}' target='_blank'>{p['title']}</a>: {summary}")
+        else:
+            lines.append(f"- {p['title']}: {summary}")
+
+    if qtype in ("howto", "troubleshoot"):
+        lines.append("\n**Quick follow-up (to narrow it down):**")
+        lines.append("- Which environment is this for (SIT/UAT/Prod) and what’s the exact component/service name?")
+
+    return "\n".join(lines)
 
 
 def filter_chunks_by_page_ids(chunks_meta, page_ids_set):
@@ -85,67 +311,247 @@ def filter_chunks_by_page_ids(chunks_meta, page_ids_set):
     return [c for c in chunks_meta if c.get("page_id") in page_ids_set]
 
 
+def find_last_user_index(messages):
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i]["role"] == "user":
+            return i
+    return None
 
 
-
-# Pick the page_ids from top results (unique)
-new_scope = []
-seen = set()
-for r in retrieved[:20]:
-    pid = r.get("page_id")
-    if pid and pid not in seen:
-        seen.add(pid)
-        new_scope.append(pid)
-    if len(new_scope) >= 8:
-        break
-
-# Update scope only if in follow-up mode
-if scope_mode.startswith("Follow-up"):
-    st.session_state.active_page_ids = set(new_scope)
+def delete_messages_after(messages, idx):
+    del messages[idx + 1 :]
 
 
+# -----------------------------
+# Auto load cached index on startup
+# -----------------------------
+if st.session_state.chunks_meta is None:
+    cached = load_chunks()
+    if cached:
+        st.session_state.chunks_meta = cached
+        st.session_state.bm25 = build_bm25(cached)
 
 
-
-chunks_for_search = st.session_state.chunks_meta
-if scope_mode.startswith("Follow-up") and st.session_state.active_page_ids:
-    chunks_for_search = filter_chunks_by_page_ids(chunks_for_search, st.session_state.active_page_ids)
-
-# Build a BM25 for scoped chunks (fast enough for small scope)
-bm25_scoped = build_bm25(chunks_for_search)
-
-retrieved = search_bm25(
-    prompt,
-    bm25_scoped,
-    chunks_for_search,
-    top_k=60
-)
+# -----------------------------
+# Layout
+# -----------------------------
+col1, col2 = st.columns([1, 2])
 
 
+# -----------------------------
+# Left panel: Sync / status
+# -----------------------------
+with col1:
+    st.subheader("Sync / Index")
+    st.write("Pull Confluence pages → chunk → tokenize → BM25 index (local).")
 
-prompt = st.chat_input("Ask about the docs…")
+    st.markdown("**Current CQL:**")
+    st.code(cfg.get("cql", ""), language="sql")
 
-# If we edited a question and want to regenerate
-if st.session_state.pending_question:
-    prompt_to_run = st.session_state.pending_question
-    st.session_state.pending_question = None
-elif prompt:
-    prompt_to_run = prompt
-else:
-    prompt_to_run = None
+    conf_user = st.text_input("Confluence user", key="conf_user")
+    conf_pass = st.text_input("Confluence password", type="password", key="conf_pass")
 
-if prompt_to_run:
-    # If it came from chat_input, add user message
-    if not (st.session_state.messages and st.session_state.messages[-1]["role"] == "user" and st.session_state.messages[-1]["content"] == prompt_to_run):
-        st.session_state.messages.append({"role": "user", "content": prompt_to_run})
+    if st.button("Sync Now", disabled=st.session_state.syncing):
+        st.session_state.syncing = True
+        st.session_state.sync_msg = ""
+        st.rerun()
 
-    # ... run retrieval + build answer ...
+    if st.session_state.syncing:
+        with st.spinner("Syncing Confluence and building index..."):
+            progress = st.progress(0)
+            status = st.empty()
+
+            if not conf_user or not conf_pass:
+                progress.progress(100)
+                st.session_state.sync_msg = "❌ Enter Confluence credentials."
+                st.session_state.syncing = False
+                st.rerun()
+
+            pages = sync_confluence(cfg, conf_user, conf_pass)
+
+            if not pages:
+                progress.progress(100)
+                st.session_state.sync_msg = "✅ No updated pages found. Index unchanged."
+                st.session_state.syncing = False
+                st.rerun()
+
+            total_pages = len(pages)
+            chunks_meta_new = []
+
+            max_workers = min(16, (os.cpu_count() or 4))
+            status.write(f"Parallel processing with {max_workers} workers...")
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+                futures = {ex.submit(process_page_to_chunks, p, CHUNK_SIZE, OVERLAP): p for p in pages}
+
+                done = 0
+                for fut in concurrent.futures.as_completed(futures):
+                    p = futures[fut]
+                    try:
+                        page_chunks = fut.result()
+                        chunks_meta_new.extend(page_chunks)
+                    except Exception as e:
+                        status.write(f"⚠ Failed page: {p.get('title','')} — {e}")
+
+                    done += 1
+                    progress.progress(int(done / total_pages * 100))
+
+            existing = load_chunks() or []
+            changed_ids = {x["page_id"] for x in chunks_meta_new if x.get("page_id")}
+            existing = [x for x in existing if x.get("page_id") not in changed_ids]
+            combined = existing + chunks_meta_new
+
+            st.session_state.chunks_meta = combined
+            st.session_state.bm25 = build_bm25(combined)
+            save_chunks(combined)
+
+            progress.progress(100)
+            st.session_state.sync_msg = f"✅ Sync complete. Updated {len(changed_ids)} pages. Total chunks: {len(combined)}."
+            st.session_state.syncing = False
+            st.rerun()
+
+    if st.session_state.sync_msg:
+        st.info(st.session_state.sync_msg)
+
+    st.markdown("### Index Status")
+    if st.session_state.bm25 and st.session_state.chunks_meta:
+        st.success(f"Index loaded: {len(st.session_state.chunks_meta)} chunks")
+    else:
+        st.warning("No index loaded yet.")
+
+    if st.button("Clear Cache"):
+        if os.path.exists(CHUNKS_PATH):
+            os.remove(CHUNKS_PATH)
+        st.session_state.chunks_meta = None
+        st.session_state.bm25 = None
+        st.session_state.sync_msg = "✅ Cache cleared. Sync again."
+        st.rerun()
+
+    if st.button("Clear Chat"):
+        st.session_state.messages = []
+        st.session_state.pending_question = None
+        st.session_state.active_page_ids = None
+        st.session_state.last_answer_page_ids = []
+        st.rerun()
 
 
+# -----------------------------
+# Right panel: Chat assistant
+# -----------------------------
+with col2:
+    st.subheader("Chat")
 
+    # --- Editable last question UI ---
+    st.markdown("### Edit last question")
+    last_user_idx = find_last_user_index(st.session_state.messages)
 
+    if last_user_idx is None:
+        st.caption("No questions yet.")
+    else:
+        last_q = st.session_state.messages[last_user_idx]["content"]
+        edited_q = st.text_area("Last question", value=last_q, key="edit_last_question")
 
+        c1, c2, c3 = st.columns([1, 1, 1])
+        with c1:
+            if st.button("Update & Regenerate"):
+                st.session_state.messages[last_user_idx]["content"] = edited_q
+                delete_messages_after(st.session_state.messages, last_user_idx)
+                st.session_state.pending_question = edited_q
+                st.rerun()
+        with c2:
+            if st.button("Cancel edit"):
+                st.session_state.edit_last_question = last_q
+        with c3:
+            if st.button("Reset scope to Global"):
+                st.session_state.active_page_ids = None
+                st.session_state.last_answer_page_ids = []
+                st.rerun()
 
-if st.button("Reset scope to Global"):
-    st.session_state.active_page_ids = None
-    st.rerun()
+    # --- Scope mode control ---
+    st.markdown("### Conversation scope")
+    scope_mode = st.radio(
+        "Search scope",
+        ["Global (all docs)", "Follow-up only (last answer pages)"],
+        horizontal=True,
+        key="scope_mode_radio"
+    )
+    st.session_state.scope_mode = scope_mode
+
+    if st.session_state.active_page_ids:
+        st.caption(f"Scoped to {len(st.session_state.active_page_ids)} pages from last answer.")
+    else:
+        st.caption("Scoped to all indexed pages.")
+
+    # Render chat history
+    for m in st.session_state.messages:
+        with st.chat_message(m["role"]):
+            if m["role"] == "assistant":
+                st.markdown(m["content"], unsafe_allow_html=True)
+            else:
+                st.markdown(m["content"])
+
+    # Chat input
+    prompt = st.chat_input("Ask about the docs…")
+
+    # Decide what question to run: edited regen vs new input
+    if st.session_state.pending_question:
+        prompt_to_run = st.session_state.pending_question
+        st.session_state.pending_question = None
+    elif prompt:
+        prompt_to_run = prompt
+    else:
+        prompt_to_run = None
+
+    if prompt_to_run:
+        # Add user message if this is a fresh question (not already last message)
+        if not (st.session_state.messages and st.session_state.messages[-1]["role"] == "user" and st.session_state.messages[-1]["content"] == prompt_to_run):
+            st.session_state.messages.append({"role": "user", "content": prompt_to_run})
+
+        if not st.session_state.bm25 or not st.session_state.chunks_meta:
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": "I don’t have an index yet. Please run **Sync Now** first."
+            })
+            st.rerun()
+
+        # Apply scope: next question can be limited to last answer pages
+        chunks_for_search = st.session_state.chunks_meta
+        if st.session_state.scope_mode.startswith("Follow-up") and st.session_state.active_page_ids:
+            chunks_for_search = filter_chunks_by_page_ids(chunks_for_search, st.session_state.active_page_ids)
+
+        # Build a BM25 for this scope (fast if scope is small)
+        bm25_scoped = build_bm25(chunks_for_search)
+
+        retrieved = search_bm25(
+            prompt_to_run,
+            bm25_scoped,
+            chunks_for_search,
+            top_k=TOP_K
+        )
+
+        # Build assistant reply (page-first)
+        assistant_text = build_assistant_reply_page_first(prompt_to_run, retrieved)
+
+        # Update scope based on this answer (top pages from retrieved results)
+        # Only if follow-up mode is selected
+        new_scope = []
+        seen = set()
+        for r in retrieved[:25]:
+            pid = r.get("page_id")
+            if pid and pid not in seen:
+                seen.add(pid)
+                new_scope.append(pid)
+            if len(new_scope) >= 8:
+                break
+
+        st.session_state.last_answer_page_ids = new_scope
+
+        if st.session_state.scope_mode.startswith("Follow-up"):
+            # Only update active scope if we actually found pages
+            if new_scope:
+                st.session_state.active_page_ids = set(new_scope)
+        else:
+            st.session_state.active_page_ids = None
+
+        st.session_state.messages.append({"role": "assistant", "content": assistant_text})
+        st.rerun()

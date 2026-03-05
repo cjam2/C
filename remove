@@ -1,38 +1,156 @@
-if st.button("Search") and q:
-    if not st.session_state.bm25:
-        st.error("No index loaded. Sync first.")
+import re
+
+def split_sentences(text: str):
+    """
+    Simple sentence splitter without nltk.
+    Works decently for internal docs.
+    """
+    if not text:
+        return []
+    text = re.sub(r"\s+", " ", text).strip()
+    # split on ., ?, ! followed by space/cap/number/[
+    parts = re.split(r"(?<=[.!?])\s+(?=[A-Z0-9\[])", text)
+    # fallback: if not splitting well, return whole text
+    return [p.strip() for p in parts if p.strip()]
+
+def score_sentence(query_tokens, sent_tokens):
+    """
+    Fast lexical overlap score.
+    You can tune weights later.
+    """
+    if not sent_tokens:
+        return 0.0
+    q = set(query_tokens)
+    s = set(sent_tokens)
+    overlap = len(q & s)
+    if overlap == 0:
+        return 0.0
+    # normalize by query size so longer queries behave
+    return overlap / max(1, len(q))
+
+def build_sentence_answers(query: str, retrieved_chunks: list, max_sentences=6):
+    """
+    Takes BM25 top chunks and returns best sentences with citations.
+    """
+    q_tokens = tokenize(query)
+
+    candidates = []
+    for r in retrieved_chunks:
+        chunk = r.get("chunk", "")
+        for sent in split_sentences(chunk):
+            stoks = tokenize(sent)
+            sc = score_sentence(q_tokens, stoks)
+            if sc <= 0:
+                continue
+            candidates.append({
+                "score": sc,
+                "sentence": sent,
+                "title": r.get("title", ""),
+                "url": r.get("url", ""),
+                "space": r.get("space", ""),
+                "updated": r.get("updated", "")
+            })
+
+    # sort best-first; keep diverse-ish by not repeating identical sentences
+    candidates.sort(key=lambda x: x["score"], reverse=True)
+
+    seen = set()
+    picked = []
+    for c in candidates:
+        key = c["sentence"][:120]
+        if key in seen:
+            continue
+        seen.add(key)
+        picked.append(c)
+        if len(picked) >= max_sentences:
+            break
+
+    return picked
+
+
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+st.subheader("Chat")
+
+# Render chat history
+for m in st.session_state.messages:
+    with st.chat_message(m["role"]):
+        st.markdown(m["content"])
+
+# Chat input
+prompt = st.chat_input("Ask about the docs…")
+
+if prompt:
+    # User message
+    st.session_state.messages.append({"role": "user", "content": prompt})
+
+    # Assistant: retrieve
+    if not st.session_state.bm25 or not st.session_state.chunks_meta:
+        assistant_text = "I don’t have an index yet. Please run **Sync Now** first."
+        st.session_state.messages.append({"role": "assistant", "content": assistant_text})
+        st.rerun()
+
+    retrieved = search_bm25(
+        prompt,
+        st.session_state.bm25,
+        st.session_state.chunks_meta,
+        top_k=50
+    )
+
+    # Show only top N chunks used for sentence extraction
+    retrieved_top = retrieved[:12]
+
+    # Build sentence-level response
+    answers = build_sentence_answers(prompt, retrieved_top, max_sentences=6)
+
+    if not answers:
+        assistant_text = "I couldn’t find a clear answer in the indexed docs for that query. Try different keywords."
     else:
-        results = search_bm25(
-            q,
-            st.session_state.bm25,
-            st.session_state.chunks_meta,
-            top_k=50
-        )
+        # Build a grounded reply
+        lines = []
+        lines.append("Here’s what I found in the docs:\n")
+        for a in answers:
+            lines.append(f"- {a['sentence']}")
 
-        st.session_state.search_results = results
-        st.session_state.results_shown = 10
+        # Sources (unique by url/title)
+        sources = []
+        seen_urls = set()
+        for a in answers:
+            u = a.get("url") or ""
+            t = a.get("title") or "Source"
+            if u and u not in seen_urls:
+                seen_urls.add(u)
+                sources.append(f"- [{t}]({u})")
+
+        if sources:
+            lines.append("\n**Sources:**")
+            lines.extend(sources)
+
+        assistant_text = "\n".join(lines)
+
+    st.session_state.messages.append({"role": "assistant", "content": assistant_text})
+    st.rerun()
 
 
-# If we already have search results stored
-if "search_results" in st.session_state:
-    results = st.session_state.search_results
 
-    if not results:
-        st.warning("No matches found.")
-    else:
-        shown = st.session_state.get("results_shown", 10)
 
-        for i, r in enumerate(results[:shown], 1):
-            st.markdown(f"### {i}. {r['title']}")
-            st.write(
-                f"Space: {r['space']} | Updated: {r['updated']} | Score: {r['score']:.2f}"
-            )
-            st.write(r["chunk"][:900])
-            if r.get("url"):
-                st.markdown(f"[Open in Confluence]({r['url']})")
-            st.divider()
 
-        if shown < len(results):
-            if st.button("Show More"):
-                st.session_state.results_shown += 10
-                st.rerun()
+
+# Optional: attach top supporting chunks at the bottom
+support_chunks = retrieved_top[:5]
+
+
+lines.append("\n<details><summary><b>Show supporting chunks</b></summary>\n")
+for r in support_chunks:
+    title = r.get("title","")
+    chunk = r.get("chunk","")[:600]
+    url = r.get("url","")
+    lines.append(f"\n**{title}**  \n{chunk}…  \n{url}\n")
+lines.append("\n</details>")
+
+
+
+
+
